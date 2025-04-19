@@ -1,0 +1,368 @@
+//@version=5
+strategy("SOLETH MTPI V1.0", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000)
+import TradingView/ta/7              as ta
+// ———— Backtest Date Inputs ———— //
+startDate = input.time(timestamp("2020-01-01"), "Start Date", group="Backtest Settings")
+endDate = timestamp(year, month, dayofmonth, 0, 0)
+inBacktestPeriod = (time >= startDate and time <= endDate)
+
+//────────────────────────────────────────
+// General Settings
+//────────────────────────────────────────
+tradeMode = input.string("Long and Short", "Trade Mode", options=["Long Only", "Long and Short"], group="General Settings")
+
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Indicator 1: LWST Settings
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+supertrendType = input.string("Smoothed", "Supertrend Type", options=["Aggressive", "Smoothed"], group="LWST Settings")
+Factor2        = input.float(1.49, "Factor", step=0.01, group="LWST Settings")
+Pd2            = input.int(35, "Supertrend Length", group="LWST Settings")
+fast           = input.int(22, "Fast MA Length", group="LWST Settings")
+slow           = input.int(52, "Slow MA Length", group="LWST Settings")
+
+// ———— LWMA & Supertrend Logic ———— //
+liquidity           = close * volume
+weighted_sum_fast   = math.sum(liquidity * close, fast)
+weighted_sum_slow   = math.sum(liquidity * close, slow)
+liquidity_sum_fast  = math.sum(liquidity, fast)
+liquidity_sum_slow  = math.sum(liquidity, slow)
+liqWeightedMA_fast  = weighted_sum_fast / liquidity_sum_fast
+liqWeightedMA_slow  = weighted_sum_slow / liquidity_sum_slow
+
+hl2_lwma = supertrendType == "Aggressive" ? liqWeightedMA_fast : liqWeightedMA_slow
+
+Up2 = hl2_lwma - (Factor2 * ta.atr(Pd2))
+Dn2 = hl2_lwma + (Factor2 * ta.atr(Pd2))
+
+// Supertrend-style logic for LWST
+var int Trend2 = 1
+TrendUp2   = Up2
+TrendDown2 = Dn2
+TrendUp2   := close[1] > TrendUp2[1] ? math.max(Up2, TrendUp2[1]) : Up2
+TrendDown2 := close[1] < TrendDown2[1] ? math.min(Dn2, TrendDown2[1]) : Dn2
+Trend2     := close <= TrendDown2[1] ? (close < TrendUp2[1] ? -1 : nz(Trend2[1], 1)) : 1
+Tsl2       = Trend2 == 1 ? TrendUp2 : TrendDown2
+
+// LWST signals (only active in the backtest period)
+lwst_long_signal  = ta.crossover(close, Tsl2) and barstate.isconfirmed and inBacktestPeriod
+lwst_short_signal = ta.crossunder(close, Tsl2) and barstate.isconfirmed and inBacktestPeriod
+
+// Discrete LWST signal: 1 for buy, -1 for sell, else 0.
+var int lwst_score = 0
+if (lwst_long_signal)
+    lwst_score := 1
+else if (lwst_short_signal)
+    lwst_score := -1
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Indicator 2: Michael's EMA Settings
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+emaS_value = input.int(24, minval=1, title="EMA Small - Value", group="Michael's EMA Settings")
+emaB_value = input.int(42, minval=1, title="EMA Big - Value", group="Michael's EMA Settings")
+emaS = ta.ema(close, emaS_value)
+emaB = ta.ema(close, emaB_value)
+
+// Michael's EMA Visual Settings
+arrowColorUp   = input.color(color.green, "Arrow Up Color", group="Michael's EMA Visual Settings")
+arrowColorDown = input.color(color.red,   "Arrow Down Color", group="Michael's EMA Visual Settings")
+arrowSize      = input.int(50, "Arrow Size", minval=1, group="Michael's EMA Visual Settings")
+
+// Use simple crossover/crossunder to generate discrete EMA signals
+ema_bullish = ta.crossover(emaS, emaB)
+ema_bearish = ta.crossunder(emaS, emaB)
+var int ema_score = 0
+if (ema_bearish)
+    ema_score := -1
+else if (ema_bullish)
+    ema_score := 1
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Indicator 3: DEMA Supertrend Settings
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+dema_subject = input.int(10, "Supertrend Len", minval=2, group="DEMA Supertrend Settings")
+dema_mul = input.float(5, "Supertrend Multiple", step=0.05, group="DEMA Supertrend Settings")
+dema_demalen = input.int(15, "DEMA Length", group="DEMA Supertrend Settings")
+dema_src = input.source(close, "DEMA Source", group="DEMA Supertrend Settings")
+
+dema = ta.dema(dema_src, dema_demalen)
+
+Dema_Supertrend(_mul, _atrPeriod) =>
+    src = dema
+    atr = ta.atr(_atrPeriod)
+    u = src + _mul * atr
+    l = src - _mul * atr
+    pl = nz(l[1])
+    pu = nz(u[1])
+    l := l > pl or close[1] < pl ? l : pl
+    u := u < pu or close[1] > pu ? u : pu
+    int d = na
+    float st = na
+    pt = st[1]
+    if na(atr[1])
+        d := 1
+    else if pt == pu
+        d := close > u ? -1 : 1
+    else
+        d := close < l ? 1 : -1
+    st := d == -1 ? l : u
+    [st, d]
+
+[dema_x, dema_d] = Dema_Supertrend(dema_mul, dema_subject)
+
+dema_stl = ta.crossunder(dema_d, 0)  // Long signal when direction turns down
+dema_sts = ta.crossover(dema_d, 0)   // Short signal when direction turns up
+
+var int dema_score = 0
+dema_long_signal = dema_stl and barstate.isconfirmed and inBacktestPeriod
+dema_short_signal = dema_sts and barstate.isconfirmed and inBacktestPeriod
+
+if dema_long_signal
+    dema_score := 1
+else if dema_short_signal
+    dema_score := -1
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Indicator 4: Dema AFR | viResearch Settings
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+afr_dema_len    = input.int(8, "Dema Len", group="Dema AFR Settings")
+afr_src         = input.source(close, "Dema Source", group="Dema AFR Settings")
+afr_p           = input.int(14, "Period", group="Dema AFR Settings")
+afr_atr_factor  = input.float(1.7, "Factor", step=0.1, group="Dema AFR Settings")
+
+afr_dema = ta.dema(afr_src, afr_dema_len)
+afr_val = afr_dema
+// Ensure afr_val carries its previous value if needed
+afr_val := nz(afr_val[1], afr_val)
+
+atr_afr = ta.atr(afr_p)
+e = atr_afr * afr_atr_factor
+
+atr_factoryHigh = afr_dema + e
+atr_factoryLow  = afr_dema - e
+
+if atr_factoryLow > afr_val
+    afr_val := atr_factoryLow
+if atr_factoryHigh < afr_val
+    afr_val := atr_factoryHigh
+
+afrl = afr_val > afr_val[1] and not (afr_val[1] > afr_val[2])
+afrs = afr_val < afr_val[1] and not (afr_val[1] < afr_val[2])
+
+var int afr_score = 0
+if afrl and not afrs
+    afr_score := 1
+else if afrs
+    afr_score := -1
+
+//────────────────────────────────────────
+// Indicator 5: Multiple Non-Linear Regression Settings
+//────────────────────────────────────────
+int     nlr_len = input.int(60, "Normalization Data Length", group="Non-Linear Regression Settings")
+float   nlr_learningRate = input.float(0.1, "Learning Rate", minval=0.01, step=0.01, group="Non-Linear Regression Settings") + 1
+bool    nlr_smooth     = input.bool(true, "Smooth?", group="Non-Linear Regression Settings")
+int     nlr_smooth_len = input.int(5, "Smooth Length", group="Non-Linear Regression Settings")
+
+// Coefficients for Non-Linear Regression (for 4 independent variables)
+nlr_b1 = input.float(0.5, title="Coefficient b1 (close)",  maxval=1, step=0.01, minval=0.25, group="Non-Linear Regression Settings")
+nlr_b2 = input.float(0.4, title="Coefficient b2 (open)",   maxval=1, step=0.01, minval=0.25, group="Non-Linear Regression Settings")
+nlr_b3 = input.float(0.35, title="Coefficient b3 (high)",   maxval=1, step=0.01, minval=0.25, group="Non-Linear Regression Settings")
+nlr_b4 = input.float(0.25, title="Coefficient b4 (low)",    maxval=1, step=0.01, minval=0.25, group="Non-Linear Regression Settings")
+
+// Input variables for Non-Linear Regression
+nlr_x1 = close 
+nlr_x2 = open 
+nlr_x3 = high 
+nlr_x4 = low
+
+// Data Normalization Function (0 - 1) for Non-Linear Regression
+normaliztion_data_nlr(x) =>
+    (x - ta.lowest(x, nlr_len)) / (ta.highest(x, nlr_len) - ta.lowest(x, nlr_len))
+
+// Multiple Non-linear Regression function with 4 independent variables
+nonLinearRegression_nlr(x1, x2, x3, x4, b1, b2, b3, b4) =>
+    b_1 = b1
+    b_2 = b2
+    b_3 = b3
+    b_4 = b4
+    
+    sumB = b1 + b2 + b3 + b4
+    if sumB > 1
+        b_1 := b1 / sumB
+        b_2 := b2 / sumB
+        b_3 := b3 / sumB
+        b_4 := b4 / sumB
+    poly = b_1 * x1 + b_2 * x2 + b_3 * x3 + b_4 * x4
+    poly
+
+// Error module
+errorModule(actual, predicted) =>
+    (actual - predicted)
+
+nlr_x1 := normaliztion_data_nlr(nlr_x1)
+nlr_x2 := normaliztion_data_nlr(nlr_x2)
+nlr_x3 := normaliztion_data_nlr(nlr_x3)
+nlr_x4 := normaliztion_data_nlr(nlr_x4)
+initial_val_nlr = nlr_x1
+
+predictedValues_nlr = nonLinearRegression_nlr(nlr_x1, nlr_x2, nlr_x3, nlr_x4, nlr_b1, nlr_b2, nlr_b3, nlr_b4)
+error_nlr = errorModule(initial_val_nlr, predictedValues_nlr)
+
+// Update coefficients using gradient descent
+nlr_b1 := nlr_b1 - (nlr_learningRate * (error_nlr * nlr_x1))
+nlr_b2 := nlr_b2 - (nlr_learningRate * (error_nlr * nlr_x2))
+nlr_b3 := nlr_b3 - (nlr_learningRate * (error_nlr * nlr_x3))
+nlr_b4 := nlr_b4 - (nlr_learningRate * (error_nlr * nlr_x4))
+
+non_linerreg_nlr = nonLinearRegression_nlr(nlr_x1, nlr_x2, nlr_x3, nlr_x4, nlr_b1, nlr_b2, nlr_b3, nlr_b4) + error_nlr
+
+if nlr_smooth
+    non_linerreg_nlr := math.sum(non_linerreg_nlr, nlr_smooth_len)
+    non_linerreg_nlr  := non_linerreg_nlr / nlr_smooth_len
+    
+var int nonlr_score = 0
+nonlr_long_signal = ta.crossover(non_linerreg_nlr, 0.5)
+nonlr_short_signal = ta.crossunder(non_linerreg_nlr, 0.5)
+if non_linerreg_nlr >= 0.5
+    nonlr_score := 1
+else if non_linerreg_nlr < 0.5
+    nonlr_score := -1
+
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Combined Signal Logic
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+var float finalSignal = 0.0
+
+finalSignal := math.avg(lwst_score, ema_score, dema_score, afr_score, nonlr_score) // update on every bar
+// if (lwst_score == 1 and ema_score == 1)
+//     finalSignal := 1
+// else if (lwst_score == -1 and ema_score == -1)
+//     finalSignal := -1
+// else if (lwst_score == -1 and ema_score == 1) and (lwst_score == 1 and ema_score == -1)
+//     finalSignal := 0
+
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Trade Execution Based on finalSignal
+
+if tradeMode == "Long Only"
+    if finalSignal >= 0.1
+        // If we are short, first close the short position.
+        if strategy.position_size < 0
+            strategy.entry("Long", strategy.long)
+        // If we are flat, enter long.
+        else if strategy.position_size == 0
+            strategy.entry("Long", strategy.long)
+        // If already long, do nothing.
+        else
+            na
+
+    else if finalSignal <= -0.1
+        // If we are long, first close the long position.
+        if strategy.position_size > 0
+            strategy.close("Long")
+
+        // If we are flat, enter short.
+        else
+            na
+
+    else if finalSignal > -0.1 and finalSignal < 0.1
+        // When finalSignal is 0, do nothing.
+        na
+else if tradeMode == "Long and Short"
+    if finalSignal >= 0.1
+        // If we are short, first close the short position.
+        if strategy.position_size < 0
+            strategy.close("Short")
+            strategy.entry("Long", strategy.long)
+        // If we are flat, enter long.
+        else if strategy.position_size == 0
+            strategy.entry("Long", strategy.long)
+        // If already long, do nothing.
+        else
+            na
+
+    else if finalSignal <= -0.1
+        // If we are long, first close the long position.
+        if strategy.position_size > 0
+            strategy.close("Long")
+            strategy.entry("Short", strategy.short)
+        // If we are flat, enter short.
+        else if strategy.position_size == 0
+            strategy.entry("Short", strategy.short)
+        // If already short, do nothing.
+        else
+            na
+
+    else if finalSignal > -0.1 and finalSignal < 0.1
+        // When finalSignal is 0, do nothing.
+        na
+    
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Visuals
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Plot for LWST
+plot(Tsl2, color=Trend2 == 1 ? color.teal : color.red, linewidth=2, title="LWST TSL", display=display.none)
+plotshape(lwst_long_signal, title="LWST Long", style=shape.triangleup, location=location.belowbar, color=color.teal, size=size.tiny,  display=display.none)
+plotshape(lwst_short_signal, title="LWST Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny,  display=display.none)
+
+// Plot for Michael's EMA
+plot(emaS, color=color.blue, title="EMA Small", linewidth=1, display=display.none)
+plot(emaB, color=color.orange, title="EMA Big", linewidth=2, display=display.none)
+plotshape(ema_bullish, title="EMA Bullish", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, display=display.none)
+plotshape(ema_bearish, title="EMA Bearish", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, display=display.none)
+
+// Plot for Dema Supertrend
+plot(dema_x, color=dema_d < 0 ? color.rgb(0, 255, 187) : color.rgb(255, 0, 157), linewidth=2, title="DEMA Supertrend", display=display.none)
+plotshape(dema_long_signal, title="DEMA Long", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, display=display.none)
+plotshape(dema_short_signal, title="DEMA Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, display=display.none)
+
+// Plot the Dema AFR indicator value and its signal
+plot(afr_val, title="Dema AFR", color=afr_score == 1 ? color.rgb(0,255,187) : afr_score == -1 ? color.rgb(255,0,157) : color.gray, linewidth=2, display=display.none)
+plotshape(afrl, title="AFR Long", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, display=display.none)
+plotshape(afrs, title="AFR Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, display=display.none)
+
+// Non-Linear Regression Visuals (optional; not plotting its line here)
+plot(non_linerreg_nlr, title="NonLR", color=color.purple, linewidth=2, display=display.none)
+
+// Plot finalSignal for reference
+plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal >= 0.1 ? color.green : finalSignal <= -0.1 ? color.red : color.gray)
+
+//────────────────────────────────────────
+// Table Display: Indicator Name and State
+//────────────────────────────────────────
+// Create a table with 2 columns and 7 rows (header + 5 indicators + 1 average)
+var table indicatorTable = table.new(position.top_right, 2, 7, border_width=1)
+var table dateTable = table.new(position.middle_left, 2, 1, border_width=1)
+
+table.cell(dateTable,0,0,"Date", bgcolor = color.rgb(54, 58, 69, 64), text_color = color.white, text_size = size.normal)
+table.cell(dateTable,1,0,str.tostring(year) +"-0"+ str.tostring(month) +"-"+ str.tostring(dayofmonth), bgcolor = color.rgb(54, 58, 69, 64), text_color = color.white, text_size = size.normal)
+
+// Header row (row 0)
+table.cell(indicatorTable, 0, 0, "Indicator", bgcolor=color.black, text_color=color.white, text_size=size.normal)
+table.cell(indicatorTable, 1, 0, "State",     bgcolor=color.black, text_color=color.white, text_size=size.normal)
+
+// LWST row (row 1)
+table.cell(indicatorTable, 0, 1, "LWST", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 1, str.tostring(lwst_score), bgcolor=color.silver, text_color=color.black)
+
+// EMA row (row 2)
+table.cell(indicatorTable, 0, 2, "EMA", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 2, str.tostring(ema_score), bgcolor=color.silver, text_color=color.black)
+
+// DEMA row (row 3)
+table.cell(indicatorTable, 0, 3, "DEMA", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 3, str.tostring(dema_score), bgcolor=color.silver, text_color=color.black)
+
+// AFR row (row 4)
+table.cell(indicatorTable, 0, 4, "AFR", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 4, str.tostring(afr_score), bgcolor=color.silver, text_color=color.black)
+
+// Non-Linear Regression row (row 5)
+table.cell(indicatorTable, 0, 5, "NonLR", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 5, str.tostring(nonlr_score), bgcolor=color.silver, text_color=color.black)
+
+// Average Score row (last row)
+table.cell(indicatorTable, 0, 6, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
+table.cell(indicatorTable, 1, 6, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)

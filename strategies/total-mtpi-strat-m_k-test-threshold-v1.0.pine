@@ -1,0 +1,971 @@
+//@version=5
+strategy("TOTAL MTPI STRAT M_K", shorttitle="TOTAL MTPI Test", overlay=true, initial_capital=5000, default_qty_type=strategy.percent_of_equity, default_qty_value=99)
+
+import TradingView/ta/7              as ta
+// ———— Backtest Date Inputs ———— //
+startDate = input.time(timestamp("2020-01-01"), "Start Date", group="Backtest Settings")
+endDate = timestamp(year, month, dayofmonth, 0, 0)
+inBacktestPeriod = (time >= startDate and time <= endDate)
+var indicators_no = 12
+//────────────────────────────────────────
+// General Settings
+//────────────────────────────────────────
+tradeMode = input.string("Long Only", "Trade Mode", options=["Long Only", "Long and Short"], group="General Settings")
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Indicator 1: {Gunzo} Trend Sniper
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+// INPUTS
+ma_source               = input.source(close, title="MA source", group="{Gunzo} Trend Sniper Settings")
+ma_length               = input.int(90, title="MA length", minval=1, group="{Gunzo} Trend Sniper Settings")
+use_smoothed_line       = input.bool(true, title="Use extra smoothing", group="{Gunzo} Trend Sniper Settings")
+smoothing_length        = input.int(5, title="MA extra smoothing length", minval=1, maxval=5, group="{Gunzo} Trend Sniper Settings")
+change_bar_color        = input.bool(true, title="Change candle colors", group="{Gunzo} Trend Sniper Visual Settings")
+buysell_signals         = input.bool(false, title="Display buy/sell signals", group="{Gunzo} Trend Sniper Visual Settings")
+weakening_signals       = input.bool(false, title="Display weakening signals", group="{Gunzo} Trend Sniper Visual Settings")
+
+// Intermediate variable
+coefficient             = ma_length / 3.0
+
+// Color definitions
+weighted_line_color_up   = color.green
+weighted_line_color_down = color.red
+candle_bar_color_up      = color.new(#26A69A, 0)
+candle_bar_color_down    = color.new(#EF5350, 0)
+
+// FUNCTION DEFINITION: Calculate WMA with coefficient
+fn_calculate_wma_with_coefficient(source, length, coefficient) =>
+    float candle_weighted_sum   = 0.0
+    float total_weight          = 0.0 
+    // Loop from 0 to length (inclusive)
+    for i = 0 to length
+        float candle_weight = (length - i)
+        candle_weighted_sum += ((candle_weight - coefficient) * source[i])
+        total_weight        += (candle_weight - coefficient)
+    weighted_line = candle_weighted_sum / total_weight
+    weighted_line
+
+// CALCULATING THE WEIGHTED MOVING AVERAGE
+weighted_line           = fn_calculate_wma_with_coefficient(ma_source, ma_length, coefficient)
+weighted_line_smooth    = ta.ema(weighted_line, smoothing_length)
+weighted_line_plotted   = use_smoothed_line ? weighted_line_smooth : weighted_line
+
+// Determine trend direction and line color
+trend_up            = weighted_line_plotted > weighted_line_plotted[1] 
+trend_down          = not trend_up
+weighted_line_color = trend_up ? weighted_line_color_up : weighted_line_color_down
+
+// SIGNALS: Detect trend changes
+buy_signal          = trend_up and not trend_up[1]      // trend turns up
+sell_signal         = trend_down and not trend_down[1]    // trend turns down
+
+// Optional: trend weakening signals
+uptrend_weak        = trend_up and close < weighted_line
+downtrend_weak      = trend_down and close > weighted_line
+
+// Optional: Change candle colors based on the trend
+isUp()              => change_bar_color and (weighted_line_plotted >= weighted_line_plotted[1])
+isDown()            => change_bar_color and (weighted_line_plotted < weighted_line_plotted[1])
+barcolor(isUp() ? candle_bar_color_up : isDown() ? candle_bar_color_down : na, display=display.none)
+
+// Generate final signal based on your conditions:
+//   1    : trend is up and no weakening
+//   0.5  : trend is up but weakening
+//  -0.5  : trend is down but weakening
+//  -1    : trend is down and not weak
+var float gunzo_trend_sniper_score = 0.0
+if trend_up
+    gunzo_trend_sniper_score := uptrend_weak ? 0.5 : 1.0
+else if trend_down
+    gunzo_trend_sniper_score := downtrend_weak ? -0.5 : -1.0
+
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Indicator 2: Michael's EMA Settings
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+emaS_value = input.int(12, minval=1, title="EMA Small - Value", group="Michael's EMA Settings")
+emaB_value = input.int(21, minval=1, title="EMA Big - Value", group="Michael's EMA Settings")
+emaS = ta.ema(close, emaS_value)
+emaB = ta.ema(close, emaB_value)
+
+// Michael's EMA Visual Settings
+arrowColorUp   = input.color(color.green, "Arrow Up Color", group="Michael's EMA Visual Settings")
+arrowColorDown = input.color(color.red,   "Arrow Down Color", group="Michael's EMA Visual Settings")
+arrowSize      = input.int(50, "Arrow Size", minval=1, group="Michael's EMA Visual Settings")
+
+// Use simple crossover/crossunder to generate discrete EMA signals
+ema_bullish = ta.crossover(emaS, emaB)
+ema_bearish = ta.crossunder(emaS, emaB)
+var int ema_score = 0
+if (ema_bearish)
+    ema_score := -1
+else if (ema_bullish)
+    ema_score := 1
+
+//=====================================================================================
+// INDICATOR 3: Ehlers MESA Adaptive Moving Averages (MAMA & FAMA)
+//=====================================================================================
+// Converted from v4 to v5
+fastLimit    = input.float(0.5, title="Fast Limit", step=0.01, group="MAMA Settings")
+slowLimit    = input.float(0.05, title="Slow Limit", step=0.01, group="MAMA Settings")
+applyFilling = input.bool(true, title="Apply Ribbon Filling ?", group="MAMA Settings")
+src          = input.source(hl2, title="Source", group="MAMA Settings")
+
+var float PI = 2 * math.asin(1)
+
+// Truncated Hilbert Transform
+_hilbertTransform(src) =>
+    0.0962 * src + 0.5769 * nz(src[2]) - 0.5769 * nz(src[4]) - 0.0962 * nz(src[6])
+
+// Compute a component for MESA
+_computeComponent(src, mesaPeriodMult) =>
+    _hilbertTransform(src) * mesaPeriodMult
+
+// Smooth a component
+_smoothComponent(src) =>
+    0.2 * src + 0.8 * nz(src[1])
+
+// Compute Alpha for MAMA & FAMA
+_computeAlpha(src, fastLimit, slowLimit) =>
+    // Initialize mesaPeriod and multiplier
+    mesaPeriod = 0.0
+    mesaPeriodMult = 0.075 * nz(mesaPeriod[1]) + 0.54
+
+    smooth = (4 * src + 3 * nz(src[1]) + 2 * nz(src[2]) + nz(src[3])) / 10
+    detrender = _computeComponent(smooth, mesaPeriodMult)
+
+    // Compute InPhase and Quadrature components
+    I1 = nz(detrender[3])
+    Q1 = _computeComponent(detrender, mesaPeriodMult)
+
+    // Advance phase by 90 degrees
+    jI = _computeComponent(I1, mesaPeriodMult)
+    jQ = _computeComponent(Q1, mesaPeriodMult)
+
+    // Phasor addition for 3-bar averaging
+    I2 = I1 - jQ
+    Q2 = Q1 + jI
+
+    // Smooth the components
+    I2 := _smoothComponent(I2)
+    Q2 := _smoothComponent(Q2)
+
+    // Homodyne Discriminator
+    Re = I2 * nz(I2[1], I2) + Q2 * nz(Q2[1], Q2)
+    Im = I2 * nz(Q2[1], Q2) - Q2 * nz(I2[1], I2)
+
+    Re := _smoothComponent(Re)
+    Im := _smoothComponent(Im)
+
+    if Re != 0 and Im != 0
+        mesaPeriod := 2 * PI / math.atan(Im / Re)
+
+    mesaPeriod := math.min(mesaPeriod, 1.5 * nz(mesaPeriod[1], mesaPeriod))
+    mesaPeriod := math.max(mesaPeriod, 0.67 * nz(mesaPeriod[1], mesaPeriod))
+    mesaPeriod := math.min(math.max(mesaPeriod, 6), 50)
+    mesaPeriod := _smoothComponent(mesaPeriod)
+
+    phase = 0.0
+    if I1 != 0
+        phase := (180 / PI) * math.atan(Q1 / I1)
+
+    deltaPhase = nz(phase[1], phase) - phase
+    deltaPhase := math.max(deltaPhase, 1)
+    alpha = math.max(fastLimit / deltaPhase, slowLimit)
+    alpha
+
+alpha = _computeAlpha(src, fastLimit, slowLimit)
+alpha2 = alpha / 2
+
+// Calculate MAMA and FAMA
+mama = 0.0
+mama := alpha * src + (1 - alpha) * nz(mama[1])
+fama = 0.0
+fama := alpha2 * mama + (1 - alpha2) * nz(fama[1])
+
+// Generate MAMA & FAMA cross signals (for alerts, if needed)
+mamaLong  = ta.crossover(mama, fama)
+mamaShort = ta.crossunder(mama, fama)
+alertcondition(mamaLong, title="Alert: Long", message="MAMA & FAMA Long!")
+alertcondition(mamaShort, title="Alert: Short", message="MAMA & FAMA Short!")
+var int mama_fama_score = 0
+if mamaLong
+    mama_fama_score := 1
+else if mamaShort
+    mama_fama_score := -1
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Indicator 4: Recursive Moving Trend Average (RMTA)
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+rmta_length      = input.int(99, title="RMTA Length", minval=1, group="RMTA Settings")
+rmta_highlight   = input.bool(true, title="Highlight Movements ?", group="RMTA Settings")
+rmta_src         = input.source(close, title="RMTA Source", group="RMTA Settings")
+
+rmta_alpha = 2 / (rmta_length + 1)
+var float rmta_b = 0.0
+rmta_b := (1 - rmta_alpha) * nz(rmta_b[1], rmta_src) + rmta_src
+var float rmta_val = 0.0
+rmta_val := (1 - rmta_alpha) * nz(rmta_val[1], rmta_src) + rmta_alpha * (rmta_src + rmta_b - nz(rmta_b[1]))
+
+// For a discrete score, we assign +1 when RMTA is rising, -1 when falling.
+var int rmta_score = 0
+if rmta_val > nz(rmta_val[1])
+    rmta_score := 1
+else if rmta_val < nz(rmta_val[1])
+    rmta_score := -1
+else
+    rmta_score := 0
+
+//=====================================================================================
+// Indicator 5: Kijun Sen Base
+//=====================================================================================
+// Kijun Sen Base Inputs
+color_code_candles    = input.bool(defval=false, title="Color Code Candles? (Kijun Sen)", group="Kijun Sen Settings")
+plot_kijun_line       = input.bool(defval=true, title="Plot Kijun Base Line?", group="Kijun Sen Settings")
+color_code_kijun_line = input.bool(defval=true, title="Color Code Kijun Line?", group="Kijun Sen Settings")
+line_width_kijun      = input.int(defval=1, title="Kijun Line Width", group="Kijun Sen Settings")
+track_price           = input.bool(true, title="Track Price for Kijun?", group="Kijun Sen Settings")
+
+kijun_sen_base_period = 26  // Fixed period for Kijun Base
+nnamdert(len) => math.avg(ta.lowest(len), ta.highest(len))
+kijun_base_line = nnamdert(kijun_sen_base_period)
+kijun_p = close
+
+// Moving Average used in Kijun Sen Base calculation
+showma        = input.bool(defval=false, title="Show Kijun MA on Chart?", group="Kijun Sen Settings")
+kijun_ma_length = input.int(defval=50, minval=1, title="Kijun MA Length", group="Kijun Sen Settings")
+kijun_ma_src  = input.source(close, title="Kijun MA Source", group="Kijun Sen Settings")
+kijun_offset  = input.int(title="Kijun MA Offset", defval=0, minval=-500, maxval=500, group="Kijun Sen Settings")
+kijun_ma      = ta.sma(kijun_ma_src, kijun_ma_length)
+
+// Define bullish and bearish conditions for Kijun Sen Base
+ma_bull       = (kijun_p > kijun_ma)
+ma_bear       = (kijun_p < kijun_ma)
+ma_neutral    = (kijun_p == kijun_ma)
+kijun_bull    = (kijun_p > kijun_base_line and kijun_base_line > kijun_ma)
+kijun_bear    = (kijun_p < kijun_base_line and kijun_base_line < kijun_ma)
+kijun_neutral = (not kijun_bull and not kijun_bear)
+
+
+// Assign a discrete Kijun Sen Base score: +1 for bullish, -1 for bearish, 0 otherwise.
+var float kijun_score = 0
+if kijun_bull
+    kijun_score := 1
+else if kijun_bear
+    kijun_score := -1
+else if kijun_neutral and ma_bull
+    kijun_score := 0.5
+else if kijun_neutral and ma_bear
+    kijun_score := -0.5
+
+
+//=====================================================================================
+// Indicator 6: Smoothed Heiken Ashi
+//=====================================================================================
+import wallneradam/TAExt/8
+
+SHA_ha_smooth_length = input.int(22, "Smooth Length", minval=1, group="Before HA")
+SHA_ha_smooth_ma_type = input.string('EMA', 'MA Type', options=['SMA', 'EMA', 'WMA', "VWMA", "RMA", "DEMA", "TEMA", "ZLEMA", "HMA", "ALMA", "LSMA", "SWMA", "SMMA", "JMA", "DONCHIAN", "ATRWSMA", "ATRWEMA", "ATRWRMA", "ATRWWMA"], group="Before HA")
+SHA_ha_after_smooth_length = input.int(15, "After Smooth Length", minval=1, group="After HA")      
+SHA_ha_after_smooth_ma_type = input.string('EMA', 'After MA Type', options=['SMA', 'EMA', 'WMA', "VWMA", "RMA", "DEMA", "TEMA", "ZLEMA", "HMA", "ALMA", "LSMA", "SWMA", "SMMA", "JMA", "DONCHIAN", "ATRWSMA", "ATRWEMA", "ATRWRMA", "ATRWWMA"], group="After HA")
+
+
+// Calculation
+[SHA_o, SHA_h, SHA_l, SHA_c] = TAExt.heiken_ashi(smooth_length=SHA_ha_smooth_length, smooth_ma_type=SHA_ha_smooth_ma_type, after_smooth_length=SHA_ha_after_smooth_length, after_smooth_ma_type=SHA_ha_after_smooth_ma_type)
+var float SHA_score = 0
+if SHA_o > SHA_c
+    SHA_score := -1
+else 
+    SHA_score := 1
+
+//=====================================================================================
+// Indicator 7: DSMAWDSL [Loxx]
+//=====================================================================================
+import loxx/loxxexpandedsourcetypes/4
+import loxx/loxxmas/1
+// Convert hex colors to strings:
+greencolor = color.new(#2DD204, 0)
+redcolor   = color.new(#D2042D, 0)
+darkGreenColor = color.new(#1B7E02, 0)
+darkRedColor   = color.new(#93021F, 0)
+
+SM02 = "Slope"
+SM04 = "Levels Crosses"
+
+variant(type, src, len) =>
+    sig = 0.0
+    trig = 0.0
+    special = false
+    if type == "Exponential Moving Average - EMA"
+        [t, s, b] = loxxmas.ema(src, len)
+        sig := s
+        trig := t
+        special := b
+    else if type == "Fast Exponential Moving Average - FEMA"
+        [t, s, b] = loxxmas.fema(src, len)
+        sig := s
+        trig := t
+        special := b
+    trig
+
+smthtype = input.string("Kaufman", "Heiken-Ashi Better Smoothing", options=["AMA", "T3", "Kaufman"], group="DSMA Settings")
+srcoption = input.string("Close", "Source", group="DSMA Settings", 
+     options=["Close", "Open", "High", "Low", "Median", "Typical", "Weighted", "Average", "Average Median Body", "Trend Biased", "Trend Biased (Extreme)", 
+              "HA Close", "HA Open", "HA High", "HA Low", "HA Median", "HA Typical", "HA Weighted", "HA Average", "HA Average Median Body", "HA Trend Biased", "HA Trend Biased (Extreme)",
+              "HAB Close", "HAB Open", "HAB High", "HAB Low", "HAB Median", "HAB Typical", "HAB Weighted", "HAB Average", "HAB Average Median Body", "HAB Trend Biased", "HAB Trend Biased (Extreme)"])
+per = input.int(40, "Period", group="DSMA Settings")
+signal_length = input.int(7, "Signal Period", group="DSMA Settings")
+sigmatype = input.string("Exponential Moving Average - EMA", "Signal/DSL Smoothing", 
+     options=["Exponential Moving Average - EMA", "Fast Exponential Moving Average - FEMA"], group="DSMA Settings")
+sigtype = input.string(SM04, "Signal type", options=[SM02, SM04], group="DSMA Settings")
+colorbars = input.bool(true, "Color bars?", group="DSMA Settings")
+showSigs = input.bool(true, "Show signals?", group="DSMA Settings")
+kfl = input.float(0.666, title="* Kaufman's Adaptive MA Only - Fast End", group="DSMA Settings")
+ksl = input.float(0.0645, title="* Kaufman's Adaptive MA Only - Slow End", group="DSMA Settings")
+amafl = input.int(2, title="* Adaptive Moving Average (AMA) Only - Fast", group="DSMA Settings")
+amasl = input.int(30, title="* Adaptive Moving Average (AMA) Only - Slow", group="DSMA Settings")
+
+haclose = request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close)
+haopen  = request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, open)
+hahigh  = request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, high)
+halow   = request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, low)
+
+float dsma_src = switch srcoption
+    "Close" => close
+    "Open" => open
+    "High" => high
+    "Low" => low
+    "Median" => math.avg(low, high)
+    "Typical" => hlc3
+    "Weighted" => close  // placeholder
+    "Average" => ohlc4
+    "Average Median Body" => (close + math.avg(open, close))/2
+    "Trend Biased" => close
+    "Trend Biased (Extreme)" => close
+    "HA Close" => haclose
+    "HA Open" => haopen
+    "HA High" => hahigh
+    "HA Low" => halow
+    "HA Median" => math.avg(haopen, haclose)
+    "HA Typical" => (haopen + hahigh + halow + haclose)/4
+    "HA Weighted" => haclose
+    "HA Average" => haclose
+    "HA Average Median Body" => haclose
+    "HA Trend Biased" => haclose
+    "HA Trend Biased (Extreme)" => haclose
+    "HAB Close" => haclose
+    "HAB Open" => haopen
+    "HAB High" => hahigh
+    "HAB Low" => halow
+    "HAB Median" => math.avg(haopen, haclose)
+    "HAB Typical" => (haopen + hahigh + halow + haclose)/4
+    "HAB Weighted" => haclose
+    "HAB Average" => haclose
+    "HAB Average Median Body" => haclose
+    "HAB Trend Biased" => haclose
+    "HAB Trend Biased (Extreme)" => haclose
+    => close
+
+[filt, _, _] = loxxmas.super(ta.change(close, 2), per)
+rms = 0.
+for k = 0 to per - 1  
+    rms += math.pow(nz(filt[k]), 2)
+rms := math.sqrt(rms / per)
+scaledfit = filt / rms
+dsma_alpha = math.abs(scaledfit) * 5 / per
+dsma_out = 0.
+dsma_out := nz(dsma_out[1]) + dsma_alpha * (dsma_src - nz(dsma_out[1]))
+dsma_sig = dsma_out[1]
+levelu = 0., leveld = 0., mid = 0.
+levelu := (dsma_out > dsma_sig) ? variant(sigmatype, dsma_out, signal_length) : nz(levelu[1])
+leveld := (dsma_out < dsma_sig) ? variant(sigmatype, dsma_out, signal_length) : nz(leveld[1])
+state = 0.
+if sigtype == SM02
+    if (dsma_out < dsma_sig)
+        state := -1
+    if (dsma_out > dsma_sig)
+        state := 1
+else if sigtype == SM04
+    if (dsma_out < leveld)
+        state := -1
+    if (dsma_out > levelu)
+        state := 1
+
+goLong_pre = sigtype == SM02 ? ta.crossover(dsma_out, dsma_sig) : ta.crossover(dsma_out, levelu)
+goShort_pre = sigtype == SM02 ? ta.crossunder(dsma_out, dsma_sig) : ta.crossunder(dsma_out, leveld)
+
+contSwitch = 0
+contSwitch := nz(contSwitch[1])
+contSwitch := goLong_pre ? 1 : goShort_pre ? -1 : contSwitch
+
+colorout = sigtype == SM02 ? contSwitch == -1 ? redcolor : greencolor : 
+     state == 1 ? greencolor : state == -1 ? redcolor : color.gray
+
+goLong = goLong_pre and ta.change(contSwitch)
+goShort = goShort_pre and ta.change(contSwitch)
+dsma_score = state
+
+//=====================================================================================
+// Indicator 8: Adaptive Gaussian Moving Average (GMA)
+//=====================================================================================
+GaussianMA_length = input.int(98, minval=1, title="GMA Length", group="Gaussian MA Settings")
+GMA_adaptive = input.bool(true, title="GMA Adaptive", group="Gaussian MA Settings")
+GMA_volatilityPeriod = input.int(20, minval=1, title="GMA Volatility Period", group="Gaussian MA Settings")
+
+gma_val = 0.0
+gma_sumOfWeights = 0.0
+gma_sigma = GMA_adaptive ? ta.stdev(close, GMA_volatilityPeriod) : input.float(1.0, minval=0.1, title="GMA Standard Deviation", group="Gaussian MA Settings")
+for i = 0 to GaussianMA_length - 1
+    weight = math.exp(-math.pow(((i - (GaussianMA_length - 1)) / (2 * gma_sigma)), 2) / 2)
+    value = ta.highest(close, i + 1) + ta.lowest(close, i + 1)
+    gma_val := gma_val + (value * weight)
+    gma_sumOfWeights := gma_sumOfWeights + weight
+gma_val := (gma_val / gma_sumOfWeights) / 2
+
+var int gma_score = 0
+if close >= gma_val
+    gma_score := 1
+else
+    gma_score := -1
+
+//=====================================================================================
+// Indicator 9: Multi Deviation Scaled Moving Average [ChartPrime] (DSMA CP)
+//=====================================================================================
+cp_period = input.int(14, title="DSMA CP Period", group="DSMA ChartPrime Settings")
+cp_sensitivity_input = input.int(91, title="DSMA CP Sensitivity Base", group="DSMA ChartPrime Settings")
+cp_step = 100 - cp_sensitivity_input
+series float cp_src = hlc3
+
+// Colors for visualization
+color cp_upper_color   = #41a1ce
+color cp_down_color    = #ce8541
+
+// @function Calculates the Deviation Scaled Moving Average (DSMA)
+// @param src (series float) Source price series
+// @param period (int) Calculation period
+// @returns (float) DSMA value
+dsma_cp(src, period) =>
+    // Variables initialization
+    var float a1   = 0.0
+    var float b1   = 0.0
+    var float c1   = 0.0
+    var float c2   = 0.0
+    var float c3   = 0.0
+    var float dsma_cp_filt = 0.0
+    var float dsma_val = 0.0
+    var float s    = 0.0
+    
+    // Initialize variables on the first bar
+    if barstate.isfirst
+        pi_val = 3.1415926535897932
+        g_val  = math.sqrt(2)
+        s := 2 * pi_val / period
+        a1 := math.exp(-g_val * pi_val / (0.5 * period))
+        b1 := 2 * a1 * math.cos(g_val * s / (0.5 * period))
+        c2 := b1
+        c3 := -a1 * a1
+        c1 := 1 - c2 - c3
+    
+    // Produce Nominal zero mean with zeros in the transfer response at DC and Nyquist with no spectral distortion
+    zeros = (close - close[2])
+    // SuperSmoother Filter
+    dsma_cp_filt := c1 * (zeros + zeros[1]) / 2 + c2 * nz(dsma_cp_filt[1]) + c3 * nz(dsma_cp_filt[2])
+    
+    // Compute Standard Deviation
+    rms_val = math.sqrt(ta.ema(math.pow(dsma_cp_filt, 2), period))
+    // Rescale Filt in terms of Standard Deviations
+    scaled_filt = rms_val != 0 ? dsma_cp_filt / rms_val : 0
+    alpha1 = math.abs(scaled_filt) * 5 / period
+    dsma_val := alpha1 * close + (1 - alpha1) * nz(dsma_val[1])
+    dsma_val
+
+// @function Calculates trend percentage, color, and average DSMA
+// @param src (series float) Source price series
+// @param period (int) Initial calculation period
+// @param step (int) Step size for increasing period
+// @returns [float, float, color] Score, average DSMA, and color
+percent_trend_cp(src, period, step)=>
+    dsma_arr = array.new_float()
+
+    // Calculate DSMAs with increasing periods
+    length  = period
+    cp_dsma1 = dsma_cp(src, length)
+    length += step 
+    cp_dsma2 = dsma_cp(src, length)
+    length += step 
+    cp_dsma3 = dsma_cp(src, length)
+    length += step 
+    cp_dsma4 = dsma_cp(src, length)
+    length += step 
+    cp_dsma5 = dsma_cp(src, length)
+    length += step 
+    cp_dsma6 = dsma_cp(src, length)
+    length += step 
+    cp_dsma7 = dsma_cp(src, length)
+    length += step 
+    cp_dsma8 = dsma_cp(src, length)
+
+    // Store DSMAs in array
+    array.push(dsma_arr, cp_dsma1)
+    array.push(dsma_arr, cp_dsma2)
+    array.push(dsma_arr, cp_dsma3)
+    array.push(dsma_arr, cp_dsma4)
+    array.push(dsma_arr, cp_dsma5)
+    array.push(dsma_arr, cp_dsma6)
+    array.push(dsma_arr, cp_dsma7)
+    array.push(dsma_arr, cp_dsma8)
+    
+    cp_score = 0.
+    val = 0.142857142857142857
+
+    // Calculate score based on DSMA comparisons
+    for i = 0 to array.size(dsma_arr) - 1
+        cp_val = array.get(dsma_arr, i)
+        if cp_val > array.get(dsma_arr, array.size(dsma_arr) - 1)
+            cp_score += val
+
+    // Determine color based on score
+    cp_color =  cp_score > 0.5 
+             ? color.from_gradient(cp_score, 0.5, 1, na, cp_upper_color) 
+             : color.from_gradient(cp_score, 0, 0.5, cp_down_color, na)
+
+    [cp_score, array.avg(dsma_arr), cp_color]
+
+[dsma_cp_value, cp_ma, cp_color] = percent_trend_cp(cp_src, cp_period, cp_step)
+
+cp_up_percent = dsma_cp_value * 100
+cp_dn_percent = 100 - cp_up_percent
+
+// Detect crossovers for signal generation
+buySignal  = ta.crossover(dsma_cp_value, 0.3)
+sellSignal = ta.crossunder(dsma_cp_value, 0.7)
+var float dsma_cp_score = 0.0
+if buySignal
+    dsma_cp_score := 1
+else if sellSignal
+    dsma_cp_score := -1
+else 
+    dsma_cp_score := nz(dsma_cp_score[1])
+// Transform the DSMA CP score (range ~0–1) to a signal from -1 to 1:
+// dsma_cp_score := dsma_cp_value * 2 - 1
+
+//====================================================================
+// Indicator 10: Enhanced Kijun Sen Base (New)
+//====================================================================
+// Inputs for Enhanced Kijun Sen Base
+SMF_EKS  = input.string("NONE", options=["NONE","ATR","HMAs","SD","MAD","%oR","WMA"], group="Enhanced Kijun Sen Base Settings")
+Per_EKS  = input.int(19, title="Period", tooltip="Settings for filter: ATR, SD, MAD, %oR, WMA", group="Enhanced Kijun Sen Base Settings")
+Mult_EKS = input.float(0.55, title="Multiplier", step=0.05, tooltip="Settings for filter: ATR, SD, MAD, WMA", group="Enhanced Kijun Sen Base Settings")
+
+ATRs(per, mult) =>
+    atr = ta.atr(per)
+
+    var smoothing_factor = 0.00
+    smoothing_factor := mult * atr // mult def 0.65
+
+    smoothing_factor
+
+M1 = ATRs(Per_EKS, Mult_EKS)
+
+HMAs() =>
+    MA_length = input.int(53, title="Length Cauchy Distribution", minval=1, tooltip="Settings for filter: HMAs", group="Enhanced Kijun Sen Base Settings")
+    var smoothing_factor  = 0.00
+    smoothing_factor  := ta.hma(high - low, MA_length) / 2
+
+    smoothing_factor 
+
+M2 = HMAs()
+
+SD_func(per, mult) =>
+    std_dev = ta.stdev(close, per)
+
+    var smoothing_factor = 0.00
+    smoothing_factor := mult * std_dev // mult def 1
+
+    smoothing_factor
+    
+M3 = SD_func(Per_EKS, Mult_EKS)
+
+MAD_func(per, mult) =>
+    moving_avg = ta.ema(close, per)
+
+    avg_deviation = ta.ema(math.abs(close - moving_avg), per)
+    var smoothing_factor = 0.00
+
+    smoothing_factor := mult * avg_deviation // mult def 1.8
+
+    smoothing_factor
+
+M4 = MAD_func(Per_EKS, Mult_EKS)
+
+POR_func(per) =>
+    percentage = input.float(1.28, title="Percentage %", group="Enhanced Kijun Sen Base Settings")
+    highest_high = ta.highest(high, per)
+    lowest_low = ta.lowest(low, per)
+
+    var ranges = 0.00
+    ranges := highest_high - lowest_low
+
+    var smoothing_factor = 0.00
+
+    smoothing_factor := percentage * ranges
+
+    smoothing_factor
+
+M5 = POR_func(Per_EKS)
+
+WMAs_func(per, mult) =>
+    wma_val = ta.wma(close, per)
+    mult * (wma_val/10)
+M6 = WMAs_func(Per_EKS, Mult_EKS)
+
+KIJUN_func() =>
+    int enh_kijun_sen_base_period = input.int(46, "Base Length (Kijun)", group="Enhanced Kijun Sen Base Settings")
+
+    enh_kijun_base_line = math.avg(ta.lowest(enh_kijun_sen_base_period), ta.highest(enh_kijun_sen_base_period))
+
+    enh_kijun_base_line 
+
+M7 = KIJUN_func()
+
+var filter_val = M1
+filter_val := SMF_EKS == "ATR"  ? M1 :
+              SMF_EKS == "HMAs"  ? M2 :
+              SMF_EKS == "SD"   ? M3 :
+              SMF_EKS == "MAD"  ? M4 :
+              SMF_EKS == "%oR"  ? M5 :
+              SMF_EKS == "WMA"  ? M6 : 0
+
+long_C  = close > (M7 + filter_val)
+short_C = close < (M7 - filter_val)
+EKSB_score = long_C ? 1 : short_C ? -1 : 0
+
+//====================================================================
+// Indicator 11: Liquidity Weighted Supertrend (LWS Supertrend)
+//====================================================================
+lws_supertrendType = input.string("Smoothed", title="LWS Supertrend Type", options=["Aggressive", "Smoothed"], group="LWS Supertrend Settings")
+Factor2_lws = input.float(1.3, "LWS Factor", step=0.01, group="LWS Supertrend Settings")
+Pd2_lws = input.int(33, "LWS Supertrend Length", minval=1, maxval=100, group="LWS Supertrend Settings")
+fast_lws = input.int(19, "LWS Fast MA length", group="LWS Supertrend Settings")
+slow_lws = input.int(42, "LWS Slow MA length", group="LWS Supertrend Settings")
+
+// Liquidity calculation: volume * close price
+liq = volume * close
+
+// Weighted sums
+w_sum_fast = math.sum(liq * close, fast_lws)
+w_sum_slow = math.sum(liq * close, slow_lws)
+
+// Liquidity sum
+liq_sum_fast = math.sum(liq, fast_lws)
+liq_sum_slow = math.sum(liq, slow_lws)
+
+// Liquidity-weighted moving averages
+liqWMA_fast = w_sum_fast / liq_sum_fast
+liqWMA_slow = w_sum_slow / liq_sum_slow
+
+// Choose the appropriate LWMA based on the selected Supertrend type
+hl2_lws = lws_supertrendType == "Aggressive" ? liqWMA_fast : liqWMA_slow
+
+// Supertrend calculation
+Up2_lws = hl2_lws - (Factor2_lws * ta.atr(Pd2_lws))
+Dn2_lws = hl2_lws + (Factor2_lws * ta.atr(Pd2_lws))
+
+TrendUp2_lws = Up2_lws
+if (close[1] > TrendUp2_lws[1])
+    TrendUp2_lws := math.max(Up2_lws, TrendUp2_lws[1])
+TrendDown2_lws = Dn2_lws
+if (close[1] < TrendDown2_lws[1])
+    TrendDown2_lws := math.min(Dn2_lws, TrendDown2_lws[1])
+
+Trend2_lws = 1
+if (close <= TrendDown2_lws[1])
+    if (close < TrendUp2_lws[1])
+        Trend2_lws := -1
+    else
+        Trend2_lws := nz(Trend2_lws[1], 1)
+Tsl2_lws = Trend2_lws == 1 ? TrendUp2_lws : TrendDown2_lws
+
+lwst_buy  = ta.cross(Tsl2_lws, close) and close > Tsl2_lws
+lwst_sell = ta.cross(Tsl2_lws, close) and close < Tsl2_lws
+var int lwst_score = 0
+if lwst_buy
+    lwst_score := 1
+else if lwst_sell
+    lwst_score := -1
+
+//====================================================================
+// Indicator 12: Lsma ATR | viResearch
+//====================================================================
+len_lsma_atr = input.int(152, title="Lsma len (ATR)", group="Lsma ATR | viResearch")
+src_lsma_atr = input(close, title="Lsma source (ATR)", group="Lsma ATR | viResearch")
+lsma_atr_val = ta.linreg(src_lsma_atr, len_lsma_atr, 0)
+
+len_atr = input.int(17, title="ATR len (ATR)", group="Lsma ATR | viResearch")
+atr_atr = ta.atr(len_atr)
+
+atrl_val = lsma_atr_val + atr_atr
+atrs_val = lsma_atr_val - atr_atr
+
+L_atr = ta.crossover(high, atrl_val)
+S_atr = ta.crossunder(low, atrs_val)
+
+var int lsma_atr_score = 0
+if L_atr and not S_atr
+    lsma_atr_score := 1
+else if S_atr
+    lsma_atr_score := -1
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Combined Signal Logic
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+var float finalSignal = 0.0
+
+finalSignal := math.avg(
+ gunzo_trend_sniper_score,  // 1
+ ema_score,                 // 2
+ mama_fama_score,           // 3
+ rmta_score,                // 4
+ kijun_score,               // 5 (Classic Kijun)
+ SHA_score,                 // 6
+ dsma_score,                // 7 (DSMAWDSL [Loxx])
+ gma_score,                 // 8 (DSMA ChartPrime)
+ dsma_cp_score,             // 9 
+ EKSB_score,                // 10 (Enhanced Kijun Sen Base)
+ lwst_score,               // 11 (LWS Supertrend)
+ lsma_atr_score)           // 12 (Lsma ATR | viResearch)
+
+//────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Trade Execution Based on finalSignal
+std_volatility = ta.stdev(close, 20)
+std_threshold = 0.1 //* (1 + std_volatility / ta.ema(std_volatility, 20)) // 0.1 STD -> 107k,      0.05 STD -> 118k,      0.1 no STD -> 121k           0.05 no STD -> 127k
+
+if tradeMode == "Long Only" and inBacktestPeriod
+    if finalSignal >= std_threshold
+        // If we are short, first close the short position.
+        if strategy.position_size < 0
+            strategy.entry("Long", strategy.long)
+        // If we are flat, enter long.
+        else if strategy.position_size == 0
+            strategy.entry("Long", strategy.long)
+        // If already long, do nothing.
+        else
+            na
+
+    else if finalSignal <= -std_threshold
+        // If we are long, first close the long position.
+        if strategy.position_size > 0
+            strategy.close("Long")
+
+        // If we are flat, enter short.
+        else
+            na
+
+    else if finalSignal > -std_threshold and finalSignal < std_threshold 
+        // When finalSignal is 0, do nothing.
+        na
+else if tradeMode == "Long and Short" and inBacktestPeriod
+    if finalSignal >= std_threshold
+        // If we are short, first close the short position.
+        if strategy.position_size < 0
+            strategy.close("Short")
+            strategy.entry("Long", strategy.long)
+        // If we are flat, enter long.
+        else if strategy.position_size == 0
+            strategy.entry("Long", strategy.long)
+        // If already long, do nothing.
+        else
+            na
+
+    else if finalSignal <= -std_threshold
+        // If we are long, first close the long position.
+        if strategy.position_size > 0
+            strategy.close("Long")
+            strategy.entry("Short", strategy.short)
+        // If we are flat, enter short.
+        else if strategy.position_size == 0
+            strategy.entry("Short", strategy.short)
+        // If already short, do nothing.
+        else
+            na
+
+    else if finalSignal > -std_threshold and finalSignal < std_threshold
+        // When finalSignal is 0, do nothing.
+        na
+    
+
+// // PLOT THE WMA LINE
+// plot(weighted_line_plotted, title="WMA", color=weighted_line_color, style=plot.style_line, linewidth=3, display=display.none)
+
+// // OPTIONAL: Plot buy/sell and weakening signals
+// plotshape(buysell_signals and buy_signal, title="Buy signal", style=shape.circle, color=color.green, size=size.tiny, location=location.belowbar, display=display.none)
+// plotshape(buysell_signals and sell_signal, title="Sell signal", style=shape.circle, color=color.red, size=size.tiny, location=location.abovebar, display=display.none)
+// plotshape(weakening_signals and uptrend_weak, title="Uptrend weak", style=shape.xcross, color=color.green, size=size.tiny, location=location.belowbar, display=display.none)
+// plotshape(weakening_signals and downtrend_weak, title="Downtrend weak", style=shape.xcross, color=color.red, size=size.tiny, location=location.abovebar, display=display.none)
+
+// // ALERT CONDITIONS (if you use alerts outside the strategy tester)
+// alertcondition(buy_signal, title='Buy signal', message='Trend line is changing to green.')
+// alertcondition(sell_signal, title='Sell signal', message='Trend line is changing to red.')
+// alertcondition(uptrend_weak, title='Uptrend weak', message='Trend line is green but weak.')
+// alertcondition(downtrend_weak, title='Downtrend weak', message='Trend line is red but weak.')
+
+// // Plot for Michael's EMA
+// plot(emaS, color=color.blue, title="EMA Small", linewidth=1, display=display.none)
+// plot(emaB, color=color.orange, title="EMA Big", linewidth=2, display=display.none)
+// plotshape(ema_bullish, title="EMA Bullish", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, display=display.none)
+// plotshape(ema_bearish, title="EMA Bearish", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, display=display.none)
+
+// // Plot MAMA & FAMA
+// mamaPlot = plot(mama, title="MAMA", linewidth=2, color=color.new(#674ea7, 0), display=display.none)
+// famaPlot = plot(fama, title="FAMA", linewidth=2, color=color.new(#f6b26b, 0), display=display.none)
+// noneColor = color.new(color.white, 100)
+// fillColor = applyFilling ? (mama > fama ? color.new(#0ebb22, 80) : color.new(#cc0000, 80)) : noneColor
+// fill(mamaPlot, famaPlot, color=fillColor, display=display.none)
+
+// // Plot RMTA
+// rmta_color = rmta_highlight ? (rmta_val > nz(rmta_val[1]) ? color.green : color.red) : color.new(#6d1e7f, 0)
+// plot(rmta_val, title="RMTA", linewidth=2, color=rmta_color, display=display.none)
+
+// // Plot the Kijun Base Line and the Kijun MA (if enabled)
+// plot_kijun_line_plot = plot(
+//  plot_kijun_line ? kijun_base_line : na, color = color_code_kijun_line and kijun_neutral ? color.new(#effc43, 50) 
+//  : color_code_kijun_line and kijun_bear and ma_bear ? color.new(#fd4242, 0)  
+//  : color_code_kijun_line and kijun_bull and ma_bull ? color.new(color.lime, 0)  
+//  : not color_code_kijun_line ? color.new(color.blue, 0) : na, 
+//  title = "Kijun Base Line",
+//  style = plot.style_line, 
+//  linewidth = line_width_kijun, 
+//  trackprice = track_price, 
+//  display = display.none
+//  )
+// plot_kijun_ma = plot(
+//  showma ? kijun_ma : na, color = ma_neutral ? color.new(#effc43, 50) 
+//  : ma_bear ? color.new(#fd4242, 0)  
+//  : ma_bull ? color.new(color.lime, 0)  
+//  : na, title = "Kijun MA", offset = kijun_offset, display=display.none)
+// barcolor(color_code_candles and kijun_bear ? color.new(#FF0000, 0) : color_code_candles and kijun_bull ? color.new(color.lime, 0) : na)
+
+// // Plot Smoothed Heiken Ashi
+// plotcandle(SHA_o, SHA_h, SHA_l, SHA_c, title="Smoothed Heiken Ashi", 
+//          color=SHA_o > SHA_c ? color.new(color.red, 60) : color.new(color.lime, 60), display=display.none,
+//          wickcolor=SHA_o > SHA_c ? color.new(color.red, 20) : color.new(color.lime, 20),
+//          bordercolor=SHA_o > SHA_c ? color.new(color.red, 10) : color.new(color.lime, 10))
+
+// // Plot DSMAWDSL (hidden)
+// plot(dsma_out, "Pips-Stepped, Adaptive-ER DSEMA", color=colorout,  linewidth=3, display=display.none)
+// plot(levelu, "Level Up", color=darkGreenColor, display=display.none)
+// plot(leveld, "Level Down", color=darkRedColor, display=display.none)
+// barcolor(colorbars ? colorout : na, display=display.none)
+// plotshape(showSigs and goLong, title="Long", color=color.yellow, textcolor=color.yellow, text="L", style=shape.triangleup, location=location.belowbar, size=size.tiny, display=display.none)
+// plotshape(showSigs and goShort, title="Short", color=color.fuchsia, textcolor=color.fuchsia, text="S", style=shape.triangledown, location=location.abovebar, size=size.tiny, display=display.none)
+// alertcondition(goLong, title="Long", message="DSMAWDSL [Loxx]: Long\nSymbol: {{ticker}}\nPrice: {{close}}")
+// alertcondition(goShort, title="Short", message="DSMAWDSL [Loxx]: Short\nSymbol: {{ticker}}\nPrice: {{close}}")
+
+// // Plot Adaptive Gaussian Moving Average.
+// plot(gma_val, title="Adaptive Gaussian Moving Average", color = close >= gma_val ? color.lime : color.fuchsia, linewidth=2, display=display.none)
+// barcolor(close >= gma_val ? color.lime : color.fuchsia, display=display.none)
+
+// // Plot Multi Deviation Scaled MA ChartPrime
+// plotshape(buySignal ? cp_ma : na, "MDSMA ChartPrime Diamond Buy 1", shape.diamond, location.absolute, color.new(cp_upper_color, 50), size = size.small, force_overlay = true, display=display.none)
+// plotshape(buySignal ? cp_ma : na, "MDSMA ChartPrime Diamond Buy 2", shape.diamond, location.absolute, cp_upper_color, size = size.tiny, force_overlay = true, display=display.none)
+
+// plotshape(sellSignal ? cp_ma : na, "MDSMA ChartPrime Diamond Sell 1", shape.diamond, location.absolute, color.new(cp_down_color, 50), size = size.small, force_overlay = true, display=display.none)
+// plotshape(sellSignal ? cp_ma : na, "MDSMA ChartPrime Diamond Sell 2", shape.diamond, location.absolute, cp_down_color, size = size.tiny, force_overlay = true, display=display.none)
+
+// // Plot the main indicator line
+// plot(cp_ma, color = cp_color, linewidth = 2,  display=display.none)
+
+// // Plot Enhanced Kijun Sen Base
+// color_c = long_C ? color.rgb(255, 5, 5) : short_C ? color.white : color.rgb(100, 101, 105)
+// upperBand = M7 + filter_val
+// lowerBand = M7 - filter_val
+// upperBandPlot = plot(upperBand, title="Upper Band (EKSB)", color=color.new(color.gray, 100), linewidth=1, display=display.none)
+// lowerBandPlot = plot(lowerBand, title="Lower Band (EKSB)", color=color.new(color.gray, 100), linewidth=1, display=display.none)
+// fill(upperBandPlot, lowerBandPlot, color= long_C ? color.rgb(255, 5, 5,80): short_C ? color.rgb(255, 255, 255,80)  : color.rgb(100, 101, 105,80))
+// plot(M7, title="Kijun Base (EKSB)", color=color_c, linewidth=2, display=display.none)
+
+// Plot the LWS Supertrend and signals
+plot(Tsl2_lws, color=Trend2_lws == 1 ? color.rgb(0,255,187) : color.rgb(255,17,0), style=plot.style_line, linewidth=2, title="LWS SuperTrend", display=display.none)
+plotshape(barstate.isconfirmed and lwst_buy, title="LWS Buy", location=location.belowbar, color=color.rgb(0,255,187), style=shape.triangleup, size=size.small, display=display.none)
+plotshape(barstate.isconfirmed and lwst_sell, title="LWS Sell", location=location.abovebar, color=color.rgb(255,17,0), style=shape.triangledown, size=size.small, display=display.none)
+
+// Plot Lsma ATR
+plot(lsma_atr_val, "Lsma ATR", color = lsma_atr_score == 1 ? color.rgb(0, 255, 187) : lsma_atr_score == -1 ? color.rgb(255, 0, 157) : color.gray, linewidth = 2, display=display.none)
+x_plot = plot(atrl_val, color = color.rgb(0, 255, 187, 100), display=display.none)
+o_plot = plot(atrl_val + atr_atr, color = color.rgb(0, 255, 187, 100), display=display.none)
+y_plot = plot(atrs_val, color = color.rgb(0, 255, 187, 100), display=display.none)
+z_plot = plot(atrs_val - atr_atr, color = color.rgb(0, 255, 187, 100), display=display.none)
+fill(x_plot, o_plot, color = color.rgb(0, 255, 187, 80), display=display.none)
+fill(y_plot, z_plot, color = color.rgb(255, 0, 157, 80), display=display.none)
+alertcondition(L_atr, title="Lsma ATR Long", message="Lsma ATR Long {{exchange}}:{{ticker}}")
+alertcondition(S_atr, title="Lsma ATR Short", message="Lsma ATR Short {{exchange}}:{{ticker}}")
+
+// Plot finalSignal for reference
+plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal >= 0.1 ? color.green : finalSignal <= -0.1 ? color.red : color.gray)
+
+plot(std_threshold, "Upper threshold", style=plot.style_line,color=color.rgb(115, 255, 120))
+plot(-std_threshold, "Upper threshold", style=plot.style_line,color=color.rgb(255, 84, 84))
+// Equity Curve
+plot(strategy.equity, "Equity Curve", color=color.new(#2962FF, 0), linewidth=2)
+var table indicatorTable = table.new(position.top_right, 3, indicators_no + 2, border_width=1)
+
+const int row1 = 0
+const int row2 = 1
+const int row3 = 2
+
+table.cell(indicatorTable, row1, 0, "Nr", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 0, "Indicator", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row3, 0, "Score", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+
+table.cell(indicatorTable, row1, 1, "1", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 1, "{Gunzo} Trend Sniper", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 1, str.tostring(gunzo_trend_sniper_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 2, "2", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 2, "Michael's EMA", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 2, str.tostring(ema_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 3, "3", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 3, "MAMA & FAMA", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 3, str.tostring(mama_fama_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 4, "4", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 4, "RMTA", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 4, str.tostring(rmta_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 5, "5", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 5, "Kijun Sen Base", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 5, str.tostring(kijun_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 6, "6", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 6, "Smoothed Heiken Ashi", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 6, str.tostring(SHA_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 7, "7", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 7, "DSMAWDSL", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 7, str.tostring(dsma_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 8, "8", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 8, "Adap. Gaus. MA", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 8, str.tostring(gma_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 9, "9", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 9, "Multi DSMA", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 9, str.tostring(dsma_cp_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 10, "10", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 10, "Enhanced KSB", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 10, str.tostring(EKSB_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 11, "11", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 11, "LWST", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 11, str.tostring(lwst_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, 12, "12", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, 12, "LSMA ATR viResearch", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, 12, str.tostring(lsma_atr_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, row1, indicators_no + 1, "TOT", bgcolor=color.rgb(46, 46, 46), text_color=color.rgb(221, 221, 221))
+table.cell(indicatorTable, row2, indicators_no + 1, "Final Score", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, row3, indicators_no + 1, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
