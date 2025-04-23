@@ -1,0 +1,351 @@
+//@version=6
+// Version History PineScript 12 - 01:06
+//==============================================================================================================
+// Problems at signal generation. Probably need to check how strategy exectuion is (difference between V5 and V6)
+//==============================================================================================================
+
+strategy("OTHERS.D MTPI", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000)
+// Import TradingView technical analysis library
+import TradingView/ta/7 as ta
+
+// ———— Backtest Date Inputs ———— //
+// Define start date for backtesting
+startDate = input.time(timestamp("2020-01-01"), "Start Date", group="Backtest Settings")
+// Set end date to current date
+endDate = timestamp(year, month, dayofmonth, 0, 0)
+// Check if current bar is within backtest period
+inBacktestPeriod = (time >= startDate and time <= endDate)
+
+// ———— General Settings ———— //
+// Select trade mode: Long Only or Long and Short
+tradeMode = input.string("Long and Short", "Trade Mode", options=["Long Only", "Long and Short"], group="General Settings")
+
+// TOGGLE INDICATORS
+    
+fdi_enabled = input.bool(true, "Enable FDI-Adaptive Supertrend", group="Toggle Indicators")                         // Toggle FDI-Adaptive Supertrend on/off
+med_st_enabled = input.bool(true, "Enable Median Supertrend", group="Toggle Indicators")                   // Toggle Median Supertrend on/off
+htvs_enabled = input.bool(true, "Enable Hyperbolic Tangent Volatility Stop", group="Toggle Indicators")
+
+// ———— Indicator 1: Median Supertrend | viResearch ———— //
+// Input for Supertrend ATR period
+med_st_subject = input.int(10, "Supertrend Len", minval=2, group="Median Supertrend Settings")
+// Input for Supertrend multiplier
+med_st_mul = input.float(2.15, "Supertrend Multiple", step=0.05, group="Median Supertrend Settings")
+// Input for median smoothing length
+med_st_slen = input.int(14, "Median Length", group="Median Supertrend Settings")
+// Input for source data (default: close)
+med_st_src_me = input.source(close, "Median Source", group="Median Supertrend Settings")
+
+// Calculate median-smoothed price using percentile rank
+med_st_smooth = ta.percentile_nearest_rank(med_st_src_me, med_st_slen, 50)
+
+// Function to compute Median Supertrend
+med_st_Median_Supertrend(_mul, _atrPeriod) =>
+    src = med_st_smooth
+    atr = ta.atr(_atrPeriod)  // Calculate ATR
+    u = src + _mul * atr      // Upper band
+    l = src - _mul * atr      // Lower band
+    pl = nz(l[1])             // Previous lower band
+    pu = nz(u[1])             // Previous upper band
+    l := l > pl or close[1] < pl ? l : pl  // Update lower band
+    u := u < pu or close[1] > pu ? u : pu  // Update upper band
+    var int d = na            // Direction variable
+    var float st = na         // Supertrend value
+    pt = st[1]                // Previous Supertrend
+    if na(atr[1])
+        d := 1                // Initial direction
+    else if pt == pu
+        d := close > u ? -1 : 1  // Direction based on upper band
+    else
+        d := close < l ? 1 : -1  // Direction based on lower band
+    st := d == -1 ? l : u     // Set Supertrend value
+    [st, d]
+
+// Compute Supertrend and direction
+[med_st_x, med_st_d] = med_st_Median_Supertrend(med_st_mul, med_st_subject)
+
+// Detect long signal (direction crosses under 0)
+med_st_stl = ta.crossunder(med_st_d, 0)
+// Detect short signal (direction crosses over 0)
+med_st_sts = ta.crossover(med_st_d, 0)
+
+// Confirm signals within backtest period
+med_st_L = med_st_stl and barstate.isconfirmed and inBacktestPeriod
+med_st_S = med_st_sts and barstate.isconfirmed and inBacktestPeriod
+
+// Track signal state
+var int med_st_vii = 0
+if med_st_L and not med_st_S
+    med_st_vii := 1       // Long signal
+else if med_st_S
+    med_st_vii := -1      // Short signal
+
+// Assign score for strategy, 0 if disabled
+var int med_st_score = 0
+if med_st_enabled
+    if med_st_L
+        med_st_score := 1     // Long score
+    else if med_st_S
+        med_st_score := -1    // Short score
+
+// ———— Indicator 2: FDI-Adaptive Supertrend w/ Floating Levels [Loxx] ———— //
+// Input for source data (user-specified: ohlc4)
+fdi_src = input.source(ohlc4, "Source", group="FDI-Adaptive Supertrend Settings")
+// Input for fractal period (user-specified: 8)
+fdi_per = input.int(8, "Fractal Period Ingest", group="FDI-Adaptive Supertrend Settings")
+// Input for speed adjustment (user-specified: 30)
+fdi_speed = input.int(30, "Speed", group="FDI-Adaptive Supertrend Settings")
+// Input for Supertrend multiplier (user-specified: 3.25)
+fdi_mult = input.float(3.25, "Multiplier", group="FDI-Adaptive Supertrend Settings")
+// Input to enable adaptive period
+fdi_adapt = input.bool(true, "Make it adaptive?", group="FDI-Adaptive Supertrend Settings")
+
+// Colors for plotting
+fdi_greencolor = #2DD204
+fdi_redcolor = #D2042D
+
+// Custom RMA (Running Moving Average) function
+fdi_RMA(x, t) =>
+    EMA1 = x
+    EMA1 := na(EMA1[1]) ? x : (x - nz(EMA1[1])) * (1/t) + nz(EMA1[1])
+    EMA1
+
+// FDI (Fractal Dimension Index) calculation
+fdi_fdip(float src, int per, int speedin) =>
+    float fmax = ta.highest(src, per)  // Highest price in period
+    float fmin = ta.lowest(src, per)   // Lowest price in period
+    float length = 0
+    float diff = 0
+    for i = 1 to per - 1
+        diff := (nz(src[i]) - fmin) / (fmax - fmin)  // Normalized difference
+        if i > 0
+            length += math.sqrt(math.pow(nz(diff[i]) - nz(diff[i + 1]), 2) + (1 / math.pow(per, 2)))
+    float fdi = 1 + (math.log(length) + math.log(2)) / math.log(2 * per)  // FDI value
+    float traildim = 1 / (2 - fdi)    // Trail dimension
+    float alpha = traildim / 2        // Alpha for speed adjustment
+    int speed = math.round(speedin * alpha)  // Adjusted speed
+    speed
+
+// Supertrend calculation
+fdi_pine_supertrend(float src, float factor, int atrPeriod) =>
+    float atr = fdi_RMA(ta.tr(true), atrPeriod)  // ATR using RMA
+    float upperBand = src + factor * atr  // Upper band
+    float lowerBand = src - factor * atr  // Lower band
+    float prevLowerBand = nz(lowerBand[1])  // Previous lower band
+    float prevUpperBand = nz(upperBand[1])  // Previous upper band
+    
+    lowerBand := lowerBand > prevLowerBand or close[1] < prevLowerBand ? lowerBand : prevLowerBand
+    upperBand := upperBand < prevUpperBand or close[1] > prevUpperBand ? upperBand : prevUpperBand
+    int direction = na        // Direction variable
+    float superTrend = na     // Supertrend value
+    float prevSuperTrend = superTrend[1]
+    if na(atr[1])
+        direction := 1            // Initial direction
+    else if prevSuperTrend == prevUpperBand
+        direction := close > upperBand ? -1 : 1  // Direction based on upper band
+    else
+        direction := close < lowerBand ? 1 : -1  // Direction based on lower band
+    superTrend := direction == -1 ? lowerBand : upperBand  // Set Supertrend
+    [superTrend, direction]
+
+// Calculate adaptive period using FDI
+fdi_masterdom = fdi_fdip(fdi_src, fdi_per, fdi_speed)
+int fdi_len = math.floor(fdi_masterdom) < 1 ? 1 : math.floor(fdi_masterdom)
+fdi_len := nz(fdi_len, 1)
+
+// Compute Supertrend with adaptive or fixed period
+[fdi_supertrend, fdi_direction] = fdi_pine_supertrend(fdi_src, fdi_mult, fdi_adapt ? fdi_len : fdi_per)
+
+// Detect long and short signals with delayed confirmation
+fdi_goLong = fdi_direction == -1 and fdi_direction[1] == 1 and barstate.isconfirmed and inBacktestPeriod
+fdi_goShort = fdi_direction == 1 and fdi_direction[1] == -1 and barstate.isconfirmed and inBacktestPeriod
+
+// Assign score for strategy, 0 if disabled
+var int fdi_score = 0
+if fdi_enabled
+    if fdi_goLong
+        fdi_score := 1        // Long score
+    else if fdi_goShort
+        fdi_score := -1       // Short score
+
+
+
+// ———— Indicator 3: Hyperbolic Tangent Volatility Stop ———— //
+// ———— Functions ———— //
+// Hyperbolic Tangent function
+tanh(x) =>
+    e_x = math.exp(x)
+    e_neg_x = math.exp(-x)
+    (e_x - e_neg_x) / (e_x + e_neg_x)
+
+// Hyperbolic Tangent Moving Average
+htma(src, len, mul) =>
+    tanh_src = tanh((src - ta.sma(src, len)) * mul) * ta.stdev(src, len) + ta.sma(src, len)
+    ta.sma(tanh_src, len)
+
+// Volatility Stop for HTVS
+htvs_volStop(src, atrlen, atrfactor) =>
+    if not na(src)
+        var max = src
+        var min = src
+        var uptrend = true
+        var float stop = na
+        atrM = nz(ta.atr(atrlen) * atrfactor, ta.tr)
+        max := math.max(max, src)
+        min := math.min(min, src)
+        stop := nz(uptrend ? math.max(stop, max - atrM) : math.min(stop, min + atrM), src)
+        uptrend := src - stop >= 0.0
+        if uptrend != uptrend[1]
+            max := src
+            min := src
+            stop := uptrend ? max - atrM : min + atrM
+        [stop, uptrend]
+
+// Function to calculate source based on string
+calc_src(src_str) =>
+    switch src_str
+        "open" => open
+        "high" => high
+        "low" => low
+        "close" => close
+        "oc2" => math.avg(open, close)
+        "hl2" => math.avg(high, low)
+        "occ3" => math.avg(open, close, close)
+        "hlc3" => math.avg(high, low, close)
+        "ohlc4" => math.avg(open, high, low, close)
+        "hlcc4" => math.avg(high, low, close, close)
+        => close  // default
+var string intraday_tooltip = "Updates the Long/Short signal within the bar, but may cause intra-bar signal repainting. This setting also affects alerts."
+simple bool intraday = input.bool(true, "Allow Intra-day Updating", tooltip=intraday_tooltip, group="Hyperbolic Tangent Volatility Stop Settings")
+
+htvs_htma_len = input.int(3, "HTMA Length", group="Hyperbolic Tangent Volatility Stop Settings")
+htvs_htma_src = input.string("ohlc4", "Source", options=["open", "high", "low", "close", "oc2", "hl2", "occ3", "hlc3", "ohlc4", "hlcc4"], group="Hyperbolic Tangent Volatility Stop Settings")
+htvs_htma_mult = input.float(0.3, "Hyperbolic Tangent Multiplier", minval=0.001, step=0.01, group="Hyperbolic Tangent Volatility Stop Settings")
+htvs_atr_len = input.int(30, "ATR Length", group="Hyperbolic Tangent Volatility Stop Settings")
+htvs_atr_mult = input.float(3.0, "ATR Multiplier", step=0.1, group="Hyperbolic Tangent Volatility Stop Settings")
+
+htvs_src = calc_src(htvs_htma_src)
+htvs_htma = htma(htvs_src, htvs_htma_len, htvs_htma_mult)
+[htvs_vStop, htvs_uptrend] = htvs_volStop(htvs_htma, htvs_atr_len, htvs_atr_mult)
+
+// Use current or previous bar's values based on intraday setting
+float htvs_src_signal = intraday ? htvs_src : htvs_src[1]
+float htvs_vStop_signal = intraday ? htvs_vStop : htvs_vStop[1]
+
+// Detect signals
+bool htvs_long_signal = ta.crossover(htvs_src_signal, htvs_vStop_signal)
+bool htvs_short_signal = ta.crossunder(htvs_src_signal, htvs_vStop_signal)
+
+var int htvs_score = 0
+if htvs_enabled
+    if htvs_long_signal
+        htvs_score := 1
+    else if htvs_short_signal
+        htvs_score := -1
+// ———— Combined Signal Logic ———— //
+activeCount =    (med_st_enabled         ? 1 : 0) +
+                 (fdi_enabled            ? 1 : 0) +
+                 (htvs_enabled           ? 1 : 0)
+
+totalScore = (med_st_enabled         ? med_st_score : 0) +
+             (fdi_enabled            ? fdi_score : 0) +
+             (htvs_enabled           ? htvs_score : 0)
+
+
+finalSignal = activeCount > 0 ? totalScore / activeCount : 0
+// ———— Trade Execution Based on finalSignal ———— //
+if tradeMode == "Long Only"
+    if finalSignal >= 0.1
+        // If we are short, first close the short position.
+        if strategy.position_size < 0
+            strategy.entry("Long", strategy.long)
+        // If we are flat, enter long.
+        else if strategy.position_size == 0
+            strategy.entry("Long", strategy.long)
+        // If already long, do nothing.
+        else
+            na
+
+    else if finalSignal <= -0.1
+        // If we are long, first close the long position.
+        if strategy.position_size > 0
+            strategy.close("Long")
+
+        // If we are flat, enter short.
+        else
+            na
+
+    else if finalSignal > -0.1 and finalSignal < 0.1
+        // When finalSignal is 0, do nothing.
+        na
+else if tradeMode == "Long and Short"
+    if finalSignal >= 0.1
+        // If we are short, first close the short position.
+        if strategy.position_size < 0
+            strategy.close("Short")
+            strategy.entry("Long", strategy.long)
+        // If we are flat, enter long.
+        else if strategy.position_size == 0
+            strategy.entry("Long", strategy.long)
+        // If already long, do nothing.
+        else
+            na
+
+    else if finalSignal <= -0.1
+        // If we are long, first close the long position.
+        if strategy.position_size > 0
+            strategy.close("Long")
+            strategy.entry("Short", strategy.short)
+        // If we are flat, enter short.
+        else if strategy.position_size == 0
+            strategy.entry("Short", strategy.short)
+        // If already short, do nothing.
+        else
+            na
+
+    else if finalSignal > -0.1 and finalSignal < 0.1
+        // When finalSignal is 0, do nothing.
+        na
+// ———— Visuals ———— //
+// Plot Median Supertrend line (hidden)
+plot(med_st_x, color=med_st_d < 0 ? color.rgb(0, 255, 187) : color.rgb(255, 0, 157), linewidth=2, title="Median Supertrend", display=display.none)
+// Plot Median Supertrend signals (hidden)
+plotshape(med_st_L, title="Median Long", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, display=display.none)
+plotshape(med_st_S, title="Median Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, display=display.none)
+
+// Plot FDI-Adaptive Supertrend line (hidden)
+plot(fdi_supertrend, color=fdi_direction == -1 ? fdi_greencolor : fdi_redcolor, linewidth=3, title="FDI Supertrend", display=display.none)
+// Plot FDI-Adaptive Supertrend signals (hidden)
+plotshape(fdi_goLong, title="FDI Long", style=shape.triangleup, location=location.belowbar, color=color.yellow, size=size.tiny, display=display.none)
+plotshape(fdi_goShort, title="FDI Short", style=shape.triangledown, location=location.abovebar, color=color.fuchsia, size=size.tiny, display=display.none)
+
+// Plot Hyperbolic Tangent Volatility Stop (hidden)
+plot(htvs_src, "Source", color=color.blue)
+plot(htvs_vStop, "Volatility Stop", color=color.red)
+plotshape(htvs_long_signal, "Long Signal", shape.triangleup, location.belowbar, color.green)
+plotshape(htvs_short_signal, "Short Signal", shape.triangledown, location.abovebar, color.red)
+// Plot final signal line
+plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal >= 0.1 ? color.green : finalSignal <= -0.1 ? color.red : color.gray)
+
+// ———— Table Display: Indicator Name and State ———— //
+
+var table indicatorTable = table.new(position.top_right, 2, 5, border_width=1)
+var table dateTable = table.new(position.middle_left, 2, 1, border_width=1)
+
+table.cell(dateTable, 0, 0, "Date", bgcolor=color.rgb(54, 58, 69, 64), text_color=color.white, text_size=size.normal)
+table.cell(dateTable, 1, 0, str.tostring(year) + "-0" + str.tostring(month) + "-" + str.tostring(dayofmonth), bgcolor=color.rgb(54, 58, 69, 64), text_color=color.white, text_size=size.normal)
+
+table.cell(indicatorTable, 0, 0, "Indicator", bgcolor=color.black, text_color=color.white, text_size=size.normal)
+table.cell(indicatorTable, 1, 0, "State", bgcolor=color.black, text_color=color.white, text_size=size.normal)
+
+table.cell(indicatorTable, 0, 1, "Median ST", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 1, str.tostring(med_st_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 2, "FDI ST", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 2, str.tostring(fdi_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 3, "HTVS", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 3, str.tostring(htvs_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 4, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
+table.cell(indicatorTable, 1, 4, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
