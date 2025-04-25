@@ -1,10 +1,5 @@
 //@version=6
-// Version History PineScript 12 - 01:06
-//==============================================================================================================
-// Problems at signal generation. Probably need to check how strategy exectuion is (difference between V5 and V6)
-//==============================================================================================================
-
-strategy("OTHERS.D MTPI", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000)
+strategy("OTHERS.D MTPI", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=99, initial_capital=10000)
 // Import TradingView technical analysis library
 import TradingView/ta/7 as ta
 
@@ -25,6 +20,7 @@ tradeMode = input.string("Long and Short", "Trade Mode", options=["Long Only", "
 fdi_enabled = input.bool(true, "Enable FDI-Adaptive Supertrend", group="Toggle Indicators")                         // Toggle FDI-Adaptive Supertrend on/off
 med_st_enabled = input.bool(true, "Enable Median Supertrend", group="Toggle Indicators")                   // Toggle Median Supertrend on/off
 htvs_enabled = input.bool(true, "Enable Hyperbolic Tangent Volatility Stop", group="Toggle Indicators")
+dema_afr_enabled = input.bool(true, "Enable Dema AFR", group="Toggle Indicators")
 
 // ———— Indicator 1: Median Supertrend | viResearch ———— //
 // Input for Supertrend ATR period
@@ -216,7 +212,7 @@ calc_src(src_str) =>
         "hlcc4" => math.avg(high, low, close, close)
         => close  // default
 var string intraday_tooltip = "Updates the Long/Short signal within the bar, but may cause intra-bar signal repainting. This setting also affects alerts."
-simple bool intraday = input.bool(true, "Allow Intra-day Updating", tooltip=intraday_tooltip, group="Hyperbolic Tangent Volatility Stop Settings")
+simple bool intraday = input.bool(false, "Allow Intra-day Updating", tooltip=intraday_tooltip, group="Hyperbolic Tangent Volatility Stop Settings")
 
 htvs_htma_len = input.int(3, "HTMA Length", group="Hyperbolic Tangent Volatility Stop Settings")
 htvs_htma_src = input.string("ohlc4", "Source", options=["open", "high", "low", "close", "oc2", "hl2", "occ3", "hlc3", "ohlc4", "hlcc4"], group="Hyperbolic Tangent Volatility Stop Settings")
@@ -232,24 +228,67 @@ htvs_htma = htma(htvs_src, htvs_htma_len, htvs_htma_mult)
 float htvs_src_signal = intraday ? htvs_src : htvs_src[1]
 float htvs_vStop_signal = intraday ? htvs_vStop : htvs_vStop[1]
 
+// Define signal based on original logic (sig = vStop > src ? -1 : 1)
+int htvs_sig = htvs_vStop_signal > htvs_src_signal ? -1 : 1
 // Detect signals
 bool htvs_long_signal = ta.crossover(htvs_src_signal, htvs_vStop_signal)
 bool htvs_short_signal = ta.crossunder(htvs_src_signal, htvs_vStop_signal)
-
+// Assign score based on sig
 var int htvs_score = 0
 if htvs_enabled
-    if htvs_long_signal
-        htvs_score := 1
-    else if htvs_short_signal
-        htvs_score := -1
-// ———— Combined Signal Logic ———— //
-activeCount =    (med_st_enabled         ? 1 : 0) +
-                 (fdi_enabled            ? 1 : 0) +
-                 (htvs_enabled           ? 1 : 0)
+    htvs_score := htvs_sig  // Assign 1 for green (long), -1 for red (short)
 
-totalScore = (med_st_enabled         ? med_st_score : 0) +
-             (fdi_enabled            ? fdi_score : 0) +
-             (htvs_enabled           ? htvs_score : 0)
+// ———— Indicator 4: Dema AFR | viResearch ———— //
+dema_afr_len = input.int(7, "DEMA Length", group="Dema AFR Settings")
+dema_afr_src = input.source(close, "DEMA Source", group="Dema AFR Settings")
+dema_afr_dema = ta.dema(dema_afr_src, dema_afr_len)
+
+dema_afr_period = input.int(14, "ATR Period", group="Dema AFR Settings")
+dema_afr_factor = input.float(1.7, "ATR Factor", step=0.1, group="Dema AFR Settings")
+
+
+dema_afr_atr = ta.atr(dema_afr_period)
+dema_afr_e = dema_afr_atr * dema_afr_factor
+
+dema_afr = dema_afr_dema
+dema_afr := nz(dema_afr[1], dema_afr)
+
+dema_afr_high = dema_afr_dema + dema_afr_e
+dema_afr_low = dema_afr_dema - dema_afr_e
+
+if dema_afr_low > dema_afr
+    dema_afr := dema_afr_low
+if dema_afr_high < dema_afr
+    dema_afr := dema_afr_high
+
+dema_afr_L = dema_afr > dema_afr[1] and not (dema_afr[1] > dema_afr[2]) and inBacktestPeriod and barstate.isconfirmed 
+dema_afr_S = dema_afr < dema_afr[1] and not (dema_afr[1] < dema_afr[2]) and inBacktestPeriod and barstate.isconfirmed
+
+var dema_afr_vii = 0
+if dema_afr_L and not dema_afr_S
+    dema_afr_vii := 1
+if dema_afr_S
+    dema_afr_vii := -1
+
+
+var dema_afr_score = 0
+if dema_afr_enabled
+    if dema_afr_L and not dema_afr_S
+        dema_afr_score := 1
+    if dema_afr_S
+        dema_afr_score := -1
+
+
+// ———— Combined Signal Logic ———— //
+activeCount = (med_st_enabled ? 1 : 0) +
+              (fdi_enabled ? 1 : 0) +
+              (htvs_enabled ? 1 : 0) +
+              (dema_afr_enabled ? 1 : 0)
+
+totalScore = (med_st_enabled ? med_st_score : 0) +
+             (fdi_enabled ? fdi_score : 0) +
+             (htvs_enabled ? htvs_score : 0) +
+             (dema_afr_enabled ? dema_afr_score : 0)
 
 
 finalSignal = activeCount > 0 ? totalScore / activeCount : 0
@@ -324,12 +363,16 @@ plot(htvs_src, "Source", color=color.blue)
 plot(htvs_vStop, "Volatility Stop", color=color.red)
 plotshape(htvs_long_signal, "Long Signal", shape.triangleup, location.belowbar, color.green)
 plotshape(htvs_short_signal, "Short Signal", shape.triangledown, location.abovebar, color.red)
+
+// Plot Dema AFR (hidden)
+plot(dema_afr, "Dema AFR", color=dema_afr_vii == 1 ? color.rgb(0, 255, 187) : dema_afr_vii == -1 ? color.rgb(255, 0, 157) : na, linewidth=2, display=display.none)
+
 // Plot final signal line
 plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal >= 0.1 ? color.green : finalSignal <= -0.1 ? color.red : color.gray)
 
 // ———— Table Display: Indicator Name and State ———— //
 
-var table indicatorTable = table.new(position.top_right, 2, 5, border_width=1)
+var table indicatorTable = table.new(position.top_right, 2, 6, border_width=1)
 var table dateTable = table.new(position.middle_left, 2, 1, border_width=1)
 
 table.cell(dateTable, 0, 0, "Date", bgcolor=color.rgb(54, 58, 69, 64), text_color=color.white, text_size=size.normal)
@@ -347,5 +390,8 @@ table.cell(indicatorTable, 1, 2, str.tostring(fdi_score), bgcolor=color.silver, 
 table.cell(indicatorTable, 0, 3, "HTVS", bgcolor=color.silver, text_color=color.black)
 table.cell(indicatorTable, 1, 3, str.tostring(htvs_score), bgcolor=color.silver, text_color=color.black)
 
-table.cell(indicatorTable, 0, 4, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
-table.cell(indicatorTable, 1, 4, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 0, 4, "Dema AFR", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 4, str.tostring(dema_afr_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 5, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
+table.cell(indicatorTable, 1, 5, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
