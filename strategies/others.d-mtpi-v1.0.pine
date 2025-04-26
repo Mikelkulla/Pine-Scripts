@@ -17,12 +17,17 @@ tradeMode = input.string("Long and Short", "Trade Mode", options=["Long Only", "
 
 // TOGGLE INDICATORS
     
-fdi_enabled = input.bool(true, "Enable FDI-Adaptive Supertrend", group="Toggle Indicators")                         // Toggle FDI-Adaptive Supertrend on/off
-med_st_enabled = input.bool(true, "Enable Median Supertrend", group="Toggle Indicators")                   // Toggle Median Supertrend on/off
-htvs_enabled = input.bool(true, "Enable Hyperbolic Tangent Volatility Stop", group="Toggle Indicators")
-dema_afr_enabled = input.bool(true, "Enable Dema AFR", group="Toggle Indicators")
+fdi_enabled = input.bool(true, "Enable FDI-Adaptive Supertrend", group="Toggle Indicators")                         // ———— Toggle Indicator 1: FDI-Adaptive Supertrend on/off
+med_st_enabled = input.bool(true, "Enable Median Supertrend", group="Toggle Indicators")                            // ———— Toggle Indicator 2: Median Supertrend
+htvs_enabled = input.bool(true, "Enable Hyperbolic Tangent Volatility Stop", group="Toggle Indicators")             // ———— Toggle Indicator 3: Hyperbolic Tangent Volatility Stop
+dema_afr_enabled = input.bool(true, "Enable Dema AFR", group="Toggle Indicators")                                   // ———— Toggle Indicator 4: Dema AFR
+nkama_enabled = input.bool(true, "Enable Normalized KAMA Oscillator", group="Toggle Indicators")                    // ———— Toggle Indicator 5: Normalized KAMA Oscillator
 
+
+// =======================================================================================================================================
 // ———— Indicator 1: Median Supertrend | viResearch ———— //
+// =======================================================================================================================================
+
 // Input for Supertrend ATR period
 med_st_subject = input.int(10, "Supertrend Len", minval=2, group="Median Supertrend Settings")
 // Input for Supertrend multiplier
@@ -84,7 +89,11 @@ if med_st_enabled
     else if med_st_S
         med_st_score := -1    // Short score
 
+
+// =======================================================================================================================================
 // ———— Indicator 2: FDI-Adaptive Supertrend w/ Floating Levels [Loxx] ———— //
+// =======================================================================================================================================
+
 // Input for source data (user-specified: ohlc4)
 fdi_src = input.source(ohlc4, "Source", group="FDI-Adaptive Supertrend Settings")
 // Input for fractal period (user-specified: 8)
@@ -166,7 +175,10 @@ if fdi_enabled
 
 
 
+// =======================================================================================================================================
 // ———— Indicator 3: Hyperbolic Tangent Volatility Stop ———— //
+// =======================================================================================================================================
+
 // ———— Functions ———— //
 // Hyperbolic Tangent function
 tanh(x) =>
@@ -238,7 +250,11 @@ var int htvs_score = 0
 if htvs_enabled
     htvs_score := htvs_sig  // Assign 1 for green (long), -1 for red (short)
 
+
+// =======================================================================================================================================
 // ———— Indicator 4: Dema AFR | viResearch ———— //
+// =======================================================================================================================================
+
 dema_afr_len = input.int(7, "DEMA Length", group="Dema AFR Settings")
 dema_afr_src = input.source(close, "DEMA Source", group="Dema AFR Settings")
 dema_afr_dema = ta.dema(dema_afr_src, dema_afr_len)
@@ -278,17 +294,60 @@ if dema_afr_enabled
     if dema_afr_S
         dema_afr_score := -1
 
+// =======================================================================================================================================
+// ———— Indicator 5: Normalized KAMA Oscillator | IkkeOmar (Converted to v6) ———— // Link: https://www.tradingview.com/script/OwtiIzT3-Normalized-KAMA-Oscillator-Ikke-Omar/
+// =======================================================================================================================================
+
+nkama_fast_period = input.int(8, "Fast Period", minval=1, group="Normalized KAMA Oscillator Settings")
+nkama_slow_period = input.int(31, "Slow Period", minval=1, group="Normalized KAMA Oscillator Settings")
+nkama_er_period = input.int(22, "Efficiency Ratio Period", minval=1, group="Normalized KAMA Oscillator Settings")
+nkama_norm_period = input.int(70, "Normalization Lookback", minval=1, group="Normalized KAMA Oscillator Settings")
+nkama_norm = input.bool(true, "Use Normalization", group="Normalized KAMA Oscillator Settings")
+
+nkama_col_up = color.new(#22ab94, 0)
+nkama_col_dn = color.new(#f7525f, 0)
+
+// Calculate the efficiency ratio
+nkama_change = math.abs(close - close[nkama_er_period])
+nkama_volatility = math.sum(math.abs(close - close[1]), nkama_er_period)
+nkama_er = nkama_change / nkama_volatility
+
+// Calculate the smoothing constant
+nkama_sc = nkama_er * (2 / (nkama_fast_period + 1) - 2 / (nkama_slow_period + 1)) + 2 / (nkama_slow_period + 1)
+
+// Calculate the KAMA
+nkama_kama = ta.ema(close, nkama_fast_period) + nkama_sc * (close - ta.ema(close, nkama_fast_period))
+
+// Normalize the oscillator
+nkama_lowest = ta.lowest(nkama_kama, nkama_norm_period)
+nkama_highest = ta.highest(nkama_kama, nkama_norm_period)
+nkama_normalized = (nkama_kama - nkama_lowest) / (nkama_highest - nkama_lowest) - 0.5
+
+// Detect signals based on crossing horizontal lines
+nkama_long_signal = ta.crossover(nkama_normalized, 0.05) and barstate.isconfirmed and inBacktestPeriod
+nkama_short_signal = ta.crossunder(nkama_normalized, -0.05) and barstate.isconfirmed and inBacktestPeriod
+
+// Assign score for strategy, 0 if disabled
+var int nkama_score = 0
+if nkama_enabled
+    if nkama_long_signal
+        nkama_score := 1      // Long score
+    else if nkama_short_signal
+        nkama_score := -1     // Short score
+
 
 // ———— Combined Signal Logic ———— //
-activeCount = (med_st_enabled ? 1 : 0) +
-              (fdi_enabled ? 1 : 0) +
-              (htvs_enabled ? 1 : 0) +
-              (dema_afr_enabled ? 1 : 0)
+activeCount = (med_st_enabled                       ? 1 : 0) +
+              (fdi_enabled                          ? 1 : 0) +
+              (htvs_enabled                         ? 1 : 0) +
+              (dema_afr_enabled                     ? 1 : 0) +
+              (nkama_enabled                        ? 1 : 0)
 
-totalScore = (med_st_enabled ? med_st_score : 0) +
-             (fdi_enabled ? fdi_score : 0) +
-             (htvs_enabled ? htvs_score : 0) +
-             (dema_afr_enabled ? dema_afr_score : 0)
+totalScore = (med_st_enabled                        ? med_st_score : 0) +
+             (fdi_enabled                           ? fdi_score : 0) +
+             (htvs_enabled                          ? htvs_score : 0) +
+             (dema_afr_enabled                      ? dema_afr_score : 0) +
+             (nkama_enabled                         ? nkama_score : 0)
 
 
 finalSignal = activeCount > 0 ? totalScore / activeCount : 0
@@ -345,34 +404,57 @@ else if tradeMode == "Long and Short"
     else if finalSignal > -0.1 and finalSignal < 0.1
         // When finalSignal is 0, do nothing.
         na
+
+// =======================================================================================================================================
 // ———— Visuals ———— //
+// =======================================================================================================================================
 // Plot Median Supertrend line (hidden)
+// =======================================================================================================================================
 plot(med_st_x, color=med_st_d < 0 ? color.rgb(0, 255, 187) : color.rgb(255, 0, 157), linewidth=2, title="Median Supertrend", display=display.none)
 // Plot Median Supertrend signals (hidden)
 plotshape(med_st_L, title="Median Long", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, display=display.none)
 plotshape(med_st_S, title="Median Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, display=display.none)
 
+// =======================================================================================================================================
 // Plot FDI-Adaptive Supertrend line (hidden)
+// =======================================================================================================================================
 plot(fdi_supertrend, color=fdi_direction == -1 ? fdi_greencolor : fdi_redcolor, linewidth=3, title="FDI Supertrend", display=display.none)
-// Plot FDI-Adaptive Supertrend signals (hidden)
+// Plot FDI-Adaptive Supertrend signals (hidden
 plotshape(fdi_goLong, title="FDI Long", style=shape.triangleup, location=location.belowbar, color=color.yellow, size=size.tiny, display=display.none)
 plotshape(fdi_goShort, title="FDI Short", style=shape.triangledown, location=location.abovebar, color=color.fuchsia, size=size.tiny, display=display.none)
 
+// =======================================================================================================================================
 // Plot Hyperbolic Tangent Volatility Stop (hidden)
+// =======================================================================================================================================
 plot(htvs_src, "Source", color=color.blue)
 plot(htvs_vStop, "Volatility Stop", color=color.red)
 plotshape(htvs_long_signal, "Long Signal", shape.triangleup, location.belowbar, color.green)
 plotshape(htvs_short_signal, "Short Signal", shape.triangledown, location.abovebar, color.red)
 
+// =======================================================================================================================================
 // Plot Dema AFR (hidden)
+// =======================================================================================================================================
 plot(dema_afr, "Dema AFR", color=dema_afr_vii == 1 ? color.rgb(0, 255, 187) : dema_afr_vii == -1 ? color.rgb(255, 0, 157) : na, linewidth=2, display=display.none)
 
+// =======================================================================================================================================
+// ———— Plot Normalized KAMA Oscillator ———— //
+// =======================================================================================================================================
+nkama_col_wn = nkama_normalized < 0 ? (nkama_normalized < nkama_normalized[1] ? color.new(nkama_col_dn, 50) : color.new(nkama_col_dn, 75)) : (nkama_normalized > nkama_normalized[1] ? color.new(nkama_col_up, 50) : color.new(nkama_col_up, 75))
+plot(nkama_norm ? nkama_normalized : na, style=plot.style_columns, color=nkama_col_wn, title="KAMA Oscillator Normalized", display=display.none)
+plot(not nkama_norm ? nkama_kama : na, style=plot.style_columns, color=nkama_col_wn, title="KAMA Oscillator", display=display.none)
+hline(0.2, color=nkama_col_up, linestyle=hline.style_dashed, display=display.none)
+hline(-0.2, color=nkama_col_dn, linestyle=hline.style_dashed, display=display.none)
+// =======================================================================================================================================
 // Plot final signal line
+// =======================================================================================================================================
 plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal >= 0.1 ? color.green : finalSignal <= -0.1 ? color.red : color.gray)
 
-// ———— Table Display: Indicator Name and State ———— //
 
-var table indicatorTable = table.new(position.top_right, 2, 6, border_width=1)
+// =======================================================================================================================================
+// ———— Table Display: Indicator Name and State ———— //
+// =======================================================================================================================================
+
+var table indicatorTable = table.new(position.top_right, 2, 7, border_width=1)
 var table dateTable = table.new(position.middle_left, 2, 1, border_width=1)
 
 table.cell(dateTable, 0, 0, "Date", bgcolor=color.rgb(54, 58, 69, 64), text_color=color.white, text_size=size.normal)
@@ -393,5 +475,8 @@ table.cell(indicatorTable, 1, 3, str.tostring(htvs_score), bgcolor=color.silver,
 table.cell(indicatorTable, 0, 4, "Dema AFR", bgcolor=color.silver, text_color=color.black)
 table.cell(indicatorTable, 1, 4, str.tostring(dema_afr_score), bgcolor=color.silver, text_color=color.black)
 
-table.cell(indicatorTable, 0, 5, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
-table.cell(indicatorTable, 1, 5, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 0, 5, "Norm KAMA", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 5, str.tostring(nkama_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 6, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
+table.cell(indicatorTable, 1, 6, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
