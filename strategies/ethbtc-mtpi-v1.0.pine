@@ -11,6 +11,12 @@ inBacktestPeriod = (time >= startDate and time <= endDate)
 //────────────────────────────────────────
 tradeMode = input.string("Long and Short", "Trade Mode", options=["Long Only", "Long and Short"], group="General Settings")
 
+// ———— Toggle Indicators ———— //
+lwst_enabled = input.bool(true, "Enable LWST", group="Toggle Indicators")
+ema_enabled = input.bool(true, "Enable Michael's EMA", group="Toggle Indicators")
+dema_enabled = input.bool(true, "Enable DEMA Supertrend", group="Toggle Indicators")
+afr_enabled = input.bool(true, "Enable Dema AFR", group="Toggle Indicators")
+nlr_enabled = input.bool(true, "Enable Non-Linear Regression", group="Toggle Indicators")
 
 //────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // Indicator 1: LWST Settings
@@ -146,8 +152,8 @@ if atr_factoryLow > afr_val
 if atr_factoryHigh < afr_val
     afr_val := atr_factoryHigh
 
-afrl = afr_val > afr_val[1] and not (afr_val[1] > afr_val[2])
-afrs = afr_val < afr_val[1] and not (afr_val[1] < afr_val[2])
+afrl = afr_val > afr_val[1] and not (afr_val[1] > afr_val[2]) and inBacktestPeriod and barstate.isconfirmed
+afrs = afr_val < afr_val[1] and not (afr_val[1] < afr_val[2]) and inBacktestPeriod and barstate.isconfirmed
 
 var int afr_score = 0
 if afrl and not afrs
@@ -232,15 +238,21 @@ else if non_linerreg_nlr < 0.5
 //────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // Combined Signal Logic
 //────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-var float finalSignal = 0.0
+// ———— Combined Signal Logic ———— //
+activeCount = (lwst_enabled ? 1 : 0) + 
+              (ema_enabled ? 1 : 0) + 
+              (dema_enabled ? 1 : 0) + 
+              (afr_enabled ? 1 : 0) + 
+              (nlr_enabled ? 1 : 0)
 
-finalSignal := math.avg(lwst_score, ema_score, dema_score, afr_score, nonlr_score) // update on every bar
-// if (lwst_score == 1 and ema_score == 1)
-//     finalSignal := 1
-// else if (lwst_score == -1 and ema_score == -1)
-//     finalSignal := -1
-// else if (lwst_score == -1 and ema_score == 1) and (lwst_score == 1 and ema_score == -1)
-//     finalSignal := 0
+totalScore =  (lwst_enabled ? lwst_score : 0) + 
+              (ema_enabled ? ema_score : 0) + 
+              (dema_enabled ? dema_score : 0) + 
+              (afr_enabled ? afr_score : 0) + 
+              (nlr_enabled ? nonlr_score : 0)
+
+finalSignal = activeCount > 0 ? totalScore / activeCount : 0
+
 
 
 //────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
