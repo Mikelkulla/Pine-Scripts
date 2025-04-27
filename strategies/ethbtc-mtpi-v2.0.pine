@@ -1,0 +1,254 @@
+//@version=6
+strategy("ETHBTC MTPI V2.0", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=99, initial_capital=10000)
+import TradingView/ta/7 as ta
+
+// =======================================================================================================================================
+// ———— Backtest Date Inputs ———— //
+// =======================================================================================================================================
+startDate = input.time(timestamp("2020-01-01"), "Start Date", group="Backtest Settings")
+endDate = timestamp(year, month, dayofmonth, 0, 0)
+inBacktestPeriod = (time >= startDate and time <= endDate)
+
+// =======================================================================================================================================
+// ———— General Settings ———— //
+// =======================================================================================================================================
+tradeMode = input.string("Long and Short", "Trade Mode", options=["Long Only", "Long and Short"], group="General Settings")
+
+// =======================================================================================================================================
+// ———— Toggle Indicators ———— //
+// =======================================================================================================================================
+dema_enabled = input.bool(true, "Enable DEMA Supertrend", group="Toggle Indicators")
+afr_enabled = input.bool(true, "Enable Dema AFR", group="Toggle Indicators")
+stc_enabled = input.bool(true, "Enable Schaff Trend Cycle", group="Toggle Indicators")
+
+// =======================================================================================================================================
+// ———— Indicator 1: Dema AFR | viResearch Settings ———— //
+// =======================================================================================================================================
+afr_dema_len = input.int(8, "Dema Len", group="Dema AFR Settings")
+afr_src = input.source(close, "Dema Source", group="Dema AFR Settings")
+afr_p = input.int(14, "Period", group="Dema AFR Settings")
+afr_atr_factor = input.float(1.7, "Factor", step=0.1, group="Dema AFR Settings")
+
+afr_dema = ta.dema(afr_src, afr_dema_len)
+afr_val = afr_dema
+afr_val := nz(afr_val[1], afr_val)
+
+atr_afr = ta.atr(afr_p)
+e = atr_afr * afr_atr_factor
+
+atr_factoryHigh = afr_dema + e
+atr_factoryLow = afr_dema - e
+
+if atr_factoryLow > afr_val
+    afr_val := atr_factoryLow
+if atr_factoryHigh < afr_val
+    afr_val := atr_factoryHigh
+
+afrl = afr_val > afr_val[1] and not (afr_val[1] > afr_val[2]) and inBacktestPeriod and barstate.isconfirmed
+afrs = afr_val < afr_val[1] and not (afr_val[1] < afr_val[2]) and inBacktestPeriod and barstate.isconfirmed
+
+var int afr_score = 0
+if afr_enabled
+    if afrl and not afrs
+        afr_score := 1
+    else if afrs
+        afr_score := -1
+
+
+// =======================================================================================================================================
+// ———— Indicator 2: DEMA Supertrend Settings ———— //
+// =======================================================================================================================================
+dema_subject = input.int(4, "Supertrend Len", minval=2, group="DEMA Supertrend Settings")
+dema_mul = input.float(4.05, "Supertrend Multiple", step=0.05, group="DEMA Supertrend Settings")
+dema_demalen = input.int(9, "DEMA Length", group="DEMA Supertrend Settings")
+dema_src = input.source(close, "DEMA Source", group="DEMA Supertrend Settings")
+
+dema = ta.dema(dema_src, dema_demalen)
+
+Dema_Supertrend(_mul, _atrPeriod) =>
+    src = dema
+    atr = ta.atr(_atrPeriod)
+    u = src + _mul * atr
+    l = src - _mul * atr
+    pl = nz(l[1])
+    pu = nz(u[1])
+    l := l > pl or close[1] < pl ? l : pl
+    u := u < pu or close[1] > pu ? u : pu
+    var int d = na
+    var float st = na
+    pt = st[1]
+    if na(atr[1])
+        d := 1
+    else if pt == pu
+        d := close > u ? -1 : 1
+    else
+        d := close < l ? 1 : -1
+    st := d == -1 ? l : u
+    [st, d]
+
+[dema_x, dema_d] = Dema_Supertrend(dema_mul, dema_subject)
+
+dema_stl = ta.crossunder(dema_d, 0)
+dema_sts = ta.crossover(dema_d, 0)
+
+var int dema_score = 0
+dema_long_signal = dema_stl and barstate.isconfirmed and inBacktestPeriod
+dema_short_signal = dema_sts and barstate.isconfirmed and inBacktestPeriod
+
+if dema_enabled
+    if dema_long_signal
+        dema_score := 1
+    else if dema_short_signal
+        dema_score := -1
+
+
+// =======================================================================================================================================
+// ———— Indicator 3: Schaff Trend Cycle (STC) [SHK] (Converted to v6) ———— //
+// =======================================================================================================================================
+stc_length = input.int(24, "Length", group="Schaff Trend Cycle Settings")
+stc_fastLength = input.int(52, "Fast Length", group="Schaff Trend Cycle Settings")
+stc_slowLength = input.int(100, "Slow Length", group="Schaff Trend Cycle Settings")
+stc_crossover = input.bool(true, "Signal on Quarters?", group="Schaff Trend Cycle Settings", tooltip = "If this is true the signal will be generated on 75 crossover (Bull) and on 25 crossunder (Bear). If false signals will be generated on Cross of 50.")
+stc_AAAA(BBB, BBBB, BBBBB) =>
+    fastMA = ta.ema(BBB, BBBB)
+    slowMA = ta.ema(BBB, BBBBB)
+    AAAA = fastMA - slowMA
+    AAAA
+
+stc_AAAAA(EEEEEE, BBBB, BBBBB) =>
+    AAA = input(0.32)
+    var float CCCCC = 0.0
+    var float DDD = 0.0
+    var float DDDDDD = 0.0
+    var float EEEEE = 0.0
+    BBBBBB = stc_AAAA(close, BBBB, BBBBB)
+    CCC = ta.lowest(BBBBBB, EEEEEE)
+    CCCC = ta.highest(BBBBBB, EEEEEE) - CCC
+    CCCCC := CCCC > 0 ? (BBBBBB - CCC) / CCCC * 100 : nz(CCCCC[1])
+    DDD := na(DDD[1]) ? CCCCC : DDD[1] + AAA * (CCCCC - DDD[1])
+    DDDD = ta.lowest(DDD, EEEEEE)
+    DDDDD = ta.highest(DDD, EEEEEE) - DDDD
+    DDDDDD := DDDDD > 0 ? (DDD - DDDD) / DDDDD * 100 : nz(DDDDDD[1])
+    EEEEE := na(EEEEE[1]) ? DDDDDD : EEEEE[1] + AAA * (DDDDDD - EEEEE[1])
+    EEEEE
+
+stc_mAAAAA = stc_AAAAA(stc_length, stc_fastLength, stc_slowLength)
+
+// STC signals based on original alert conditions
+var int stc_score = 0
+if stc_crossover
+    stc_long_signal = ta.crossover(stc_mAAAAA, 75) and barstate.isconfirmed and inBacktestPeriod
+    stc_short_signal = ta.crossunder(stc_mAAAAA, 25) and barstate.isconfirmed and inBacktestPeriod
+    if stc_enabled
+        if stc_long_signal
+            stc_score := 1
+        else if stc_short_signal
+            stc_score := -1
+if not stc_crossover
+    stc_long_signal = ta.crossover(stc_mAAAAA, 50) and barstate.isconfirmed and inBacktestPeriod
+    stc_short_signal = ta.crossunder(stc_mAAAAA, 50) and barstate.isconfirmed and inBacktestPeriod
+    if stc_enabled
+        if stc_long_signal
+            stc_score := 1
+        else if stc_short_signal
+            stc_score := -1
+
+
+
+// ———— Combined Signal Logic ———— //
+activeCount = (dema_enabled ? 1 : 0) + 
+              (afr_enabled ? 1 : 0) + 
+              (stc_enabled ? 1 : 0)
+
+totalScore = (dema_enabled ? dema_score : 0) + 
+             (afr_enabled ? afr_score : 0) + 
+             (stc_enabled ? stc_score : 0)
+finalSignal = activeCount > 0 ? totalScore / activeCount : 0
+
+// ———— Trade Execution Based on finalSignal ———— //
+if tradeMode == "Long Only"
+    if finalSignal >= 0.1
+        if strategy.position_size < 0
+            strategy.entry("Long", strategy.long)
+        else if strategy.position_size == 0
+            strategy.entry("Long", strategy.long)
+        else
+            na
+    else if finalSignal <= -0.1
+        if strategy.position_size > 0
+            strategy.close("Long")
+        else
+            na
+    else if finalSignal > -0.1 and finalSignal < 0.1
+        na
+else if tradeMode == "Long and Short"
+    if finalSignal >= 0.1
+        if strategy.position_size < 0
+            strategy.close("Short")
+            strategy.entry("Long", strategy.long)
+        else if strategy.position_size == 0
+            strategy.entry("Long", strategy.long)
+        else
+            na
+    else if finalSignal <= -0.1
+        if strategy.position_size > 0
+            strategy.close("Long")
+            strategy.entry("Short", strategy.short)
+        else if strategy.position_size == 0
+            strategy.entry("Short", strategy.short)
+        else
+            na
+    else if finalSignal > -0.1 and finalSignal < 0.1
+        na
+
+// ———— Visuals ———— //
+// =======================================================================================================================================
+// Plot DEMA Supertrend
+// =======================================================================================================================================
+plot(dema_x, color=dema_d < 0 ? color.rgb(0, 255, 187) : color.rgb(255, 0, 157), linewidth=2, title="DEMA Supertrend", display=display.none)
+plotshape(dema_long_signal, title="DEMA Long", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, display=display.none)
+plotshape(dema_short_signal, title="DEMA Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, display=display.none)
+
+// =======================================================================================================================================
+// Plot Dema AFR
+// =======================================================================================================================================
+plot(afr_val, title="Dema AFR", color=afr_score == 1 ? color.rgb(0, 255, 187) : afr_score == -1 ? color.rgb(255, 0, 157) : color.gray, linewidth=2, display=display.none)
+plotshape(afrl, title="AFR Long", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, display=display.none)
+plotshape(afrs, title="AFR Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, display=display.none)
+
+// =======================================================================================================================================
+// Plot Schaff Trend Cycle
+// =======================================================================================================================================
+stc_mColor = stc_mAAAAA > stc_mAAAAA[1] ? color.new(color.green, 20) : color.new(color.red, 20)
+plot(stc_mAAAAA, color=stc_mColor, title="STC", linewidth=2, display=display.none)
+plot(25, color=color.new(color.gray, 70), display=display.none)
+plot(75, color=color.new(color.gray, 70), display=display.none)
+
+// =======================================================================================================================================
+// Plot final signal line
+// =======================================================================================================================================
+plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal >= 0.1 ? color.green : finalSignal <= -0.1 ? color.red : color.gray)
+
+// =======================================================================================================================================
+// ———— Table Display: Indicator Name and State ———— //
+// =======================================================================================================================================
+var table indicatorTable = table.new(position.top_right, 2, 5, border_width=1)
+var table dateTable = table.new(position.middle_left, 2, 1, border_width=1)
+
+table.cell(dateTable, 0, 0, "Date", bgcolor=color.rgb(54, 58, 69, 64), text_color=color.white, text_size=size.normal)
+table.cell(dateTable, 1, 0, str.tostring(year) + "-0" + str.tostring(month) + "-" + str.tostring(dayofmonth), bgcolor=color.rgb(54, 58, 69, 64), text_color=color.white, text_size=size.normal)
+
+table.cell(indicatorTable, 0, 0, "Indicator", bgcolor=color.black, text_color=color.white, text_size=size.normal)
+table.cell(indicatorTable, 1, 0, "State", bgcolor=color.black, text_color=color.white, text_size=size.normal)
+
+table.cell(indicatorTable, 0, 1, "DEMA ST", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 1, str.tostring(dema_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 2, "Dema AFR", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 2, str.tostring(afr_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 3, "STC", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 3, str.tostring(stc_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 4, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
+table.cell(indicatorTable, 1, 4, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
