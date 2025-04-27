@@ -20,6 +20,7 @@ tradeMode = input.string("Long and Short", "Trade Mode", options=["Long Only", "
 dema_enabled = input.bool(true, "Enable DEMA Supertrend", group="Toggle Indicators")
 afr_enabled = input.bool(true, "Enable Dema AFR", group="Toggle Indicators")
 stc_enabled = input.bool(true, "Enable Schaff Trend Cycle", group="Toggle Indicators")
+rmi_enabled = input.bool(true, "Enable RMI Trend Sniper", group="Toggle Indicators")
 
 // =======================================================================================================================================
 // ———— Indicator 1: Dema AFR | viResearch Settings ———— //
@@ -154,15 +155,78 @@ if not stc_crossover
             stc_score := -1
 
 
+// =======================================================================================================================================
+// ———— Indicator 4: RMI Trend Sniper [TZack88] (Converted to v6) ———— //
+// =======================================================================================================================================
+rmi_length = input.int(16, "RMI Length", group="RMI Trend Sniper Settings")
+rmi_pmom = input.int(66, "Positive above", group="RMI Trend Sniper Settings")
+rmi_nmom = input.int(39, "Negative below", group="RMI Trend Sniper Settings")
+rmi_filleshow = input.bool(true, "Show Range MA", group="RMI Trend Sniper Visuals")
+rmi_bull = input.color(#00bcd4, "Bull Color", group="RMI Trend Sniper Visuals")
+rmi_bear = input.color(#ff5252, "Bear Color", group="RMI Trend Sniper Visuals")
+
+rmi_up = ta.rma(math.max(ta.change(close), 0), rmi_length)
+rmi_down = ta.rma(-math.min(ta.change(close), 0), rmi_length)
+rmi_rsi = rmi_down == 0 ? 100 : rmi_up == 0 ? 0 : 100 - (100 / (1 + rmi_up / rmi_down))
+rmi_mf = ta.mfi(hlc3, rmi_length)
+rmi_rsi_mfi = math.avg(rmi_rsi, rmi_mf)
+
+rmi_mikel_modified_for_consistency = ta.change(ta.ema(close, 5))  // This value was added the raw calculation at the two lines below and there was an error thrown for incosistency on every bar. So i made it a variable
+
+rmi_p_mom = rmi_rsi_mfi[1] < rmi_pmom and rmi_rsi_mfi > rmi_pmom and rmi_rsi_mfi > rmi_nmom and rmi_mikel_modified_for_consistency > 0
+rmi_n_mom = rmi_rsi_mfi < rmi_nmom and rmi_mikel_modified_for_consistency < 0
+
+var bool rmi_positive = false
+var bool rmi_negative = false
+
+if rmi_p_mom
+    rmi_positive := true
+    rmi_negative := false
+
+if rmi_n_mom
+    rmi_positive := false
+    rmi_negative := true
+
+rmi_long_signal = rmi_positive and not rmi_positive[1] and barstate.isconfirmed and inBacktestPeriod
+rmi_short_signal = rmi_negative and not rmi_negative[1] and barstate.isconfirmed and inBacktestPeriod
+
+var int rmi_score = 0
+if rmi_enabled
+    if rmi_long_signal
+        rmi_score := 1
+    else if rmi_short_signal
+        rmi_score := -1
+
+rmi_BarRange = high - low
+rmi_Band(len) =>
+    math.min(ta.atr(len) * 0.3, close * (0.3 / 100))[20] / 2 * 8
+
+rmi_band = rmi_Band(30)
+
+rmi_rangeMA(Range, Prd) =>
+    weight = Range / math.sum(Range, Prd)
+    sum = math.sum(close * weight, Prd)
+    tw = math.sum(weight, Prd)
+    sum / tw
+
+rmi_rwma = rmi_rangeMA(rmi_BarRange, 20)
+rmi_colour = rmi_positive ? rmi_bull : rmi_negative ? rmi_bear : na
+rmi_RWMA = rmi_positive ? rmi_rwma - rmi_band : rmi_negative ? rmi_rwma + rmi_band : na
+rmi_alpha = color.new(color.black, 100)
+rmi_max = rmi_RWMA + rmi_band
+rmi_min = rmi_RWMA - rmi_band
 
 // ———— Combined Signal Logic ———— //
 activeCount = (dema_enabled ? 1 : 0) + 
               (afr_enabled ? 1 : 0) + 
-              (stc_enabled ? 1 : 0)
+              (stc_enabled ? 1 : 0) + 
+              (rmi_enabled ? 1 : 0)
 
 totalScore = (dema_enabled ? dema_score : 0) + 
              (afr_enabled ? afr_score : 0) + 
-             (stc_enabled ? stc_score : 0)
+             (stc_enabled ? stc_score : 0) + 
+             (rmi_enabled ? rmi_score : 0)
+
 finalSignal = activeCount > 0 ? totalScore / activeCount : 0
 
 // ———— Trade Execution Based on finalSignal ———— //
@@ -225,6 +289,27 @@ plot(25, color=color.new(color.gray, 70), display=display.none)
 plot(75, color=color.new(color.gray, 70), display=display.none)
 
 // =======================================================================================================================================
+// Plot RMI Trend Sniper
+// =======================================================================================================================================
+rmi_center = plot(rmi_filleshow ? rmi_RWMA : na, "RRTH", rmi_colour, editable=true, display=display.none)
+plot(rmi_filleshow ? rmi_RWMA : na, "RRTH", color.new(rmi_colour, 70), linewidth=2, editable=true, display=display.none)
+plot(rmi_filleshow ? rmi_RWMA : na, "RRTH", color.new(rmi_colour, 80), linewidth=3, editable=true, display=display.none)
+plot(rmi_filleshow ? rmi_RWMA : na, "RRTH", color.new(rmi_colour, 90), linewidth=4, editable=true, display=display.none)
+rmi_top = plot(rmi_filleshow ? rmi_max : na, "RRTH", rmi_alpha, display=display.none)
+rmi_bottom = plot(rmi_filleshow ? rmi_min : na, "RRTH", rmi_alpha, display=display.none)
+fill(rmi_top, rmi_center, top_value=rmi_max, bottom_value=rmi_RWMA, bottom_color=color.new(rmi_colour, 75), top_color=rmi_alpha, editable=true, display=display.none)
+fill(rmi_center, rmi_bottom, top_value=rmi_RWMA, bottom_value=rmi_min, bottom_color=rmi_alpha, top_color=color.new(rmi_colour, 75), editable=true, display=display.none)
+rmi_Barcol = rmi_positive ? color.green : color.red
+if rmi_short_signal
+    label.new(bar_index, rmi_max + (rmi_band / 2), "", color=color.red, size=size.small)
+if rmi_long_signal
+    label.new(bar_index, rmi_min - (rmi_band / 2), "", color=color.green, size=size.small, style=label.style_label_up)
+plotcandle(open, high, low, close, color=rmi_Barcol, wickcolor=rmi_Barcol, bordercolor=rmi_Barcol, display=display.none)
+barcolor(color=rmi_Barcol, display=display.none)
+
+
+
+// =======================================================================================================================================
 // Plot final signal line
 // =======================================================================================================================================
 plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal >= 0.1 ? color.green : finalSignal <= -0.1 ? color.red : color.gray)
@@ -232,7 +317,7 @@ plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal
 // =======================================================================================================================================
 // ———— Table Display: Indicator Name and State ———— //
 // =======================================================================================================================================
-var table indicatorTable = table.new(position.top_right, 2, 5, border_width=1)
+var table indicatorTable = table.new(position.top_right, 2, 6, border_width=1)
 var table dateTable = table.new(position.middle_left, 2, 1, border_width=1)
 
 table.cell(dateTable, 0, 0, "Date", bgcolor=color.rgb(54, 58, 69, 64), text_color=color.white, text_size=size.normal)
@@ -250,5 +335,8 @@ table.cell(indicatorTable, 1, 2, str.tostring(afr_score), bgcolor=color.silver, 
 table.cell(indicatorTable, 0, 3, "STC", bgcolor=color.silver, text_color=color.black)
 table.cell(indicatorTable, 1, 3, str.tostring(stc_score), bgcolor=color.silver, text_color=color.black)
 
-table.cell(indicatorTable, 0, 4, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
-table.cell(indicatorTable, 1, 4, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 0, 4, "RMI", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 4, str.tostring(rmi_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 5, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
+table.cell(indicatorTable, 1, 5, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
