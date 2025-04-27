@@ -229,9 +229,9 @@ if nlr_smooth
 var int nonlr_score = 0
 nonlr_long_signal = ta.crossover(non_linerreg_nlr, 0.5)  and barstate.isconfirmed and inBacktestPeriod
 nonlr_short_signal = ta.crossunder(non_linerreg_nlr, 0.5)  and barstate.isconfirmed and inBacktestPeriod
-if non_linerreg_nlr >= 0.5
+if non_linerreg_nlr >= 0.5 and barstate.isconfirmed and inBacktestPeriod
     nonlr_score := 1
-else if non_linerreg_nlr < 0.5
+else if non_linerreg_nlr < 0.5 and barstate.isconfirmed and inBacktestPeriod
     nonlr_score := -1
 
 
