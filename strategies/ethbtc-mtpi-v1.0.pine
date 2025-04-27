@@ -75,8 +75,8 @@ arrowColorDown = input.color(color.red,   "Arrow Down Color", group="Michael's E
 arrowSize      = input.int(50, "Arrow Size", minval=1, group="Michael's EMA Visual Settings")
 
 // Use simple crossover/crossunder to generate discrete EMA signals
-ema_bullish = ta.crossover(emaS, emaB)
-ema_bearish = ta.crossunder(emaS, emaB)
+ema_bullish = ta.crossover(emaS, emaB)  and barstate.isconfirmed and inBacktestPeriod
+ema_bearish = ta.crossunder(emaS, emaB) and barstate.isconfirmed and inBacktestPeriod
 var int ema_score = 0
 if (ema_bearish)
     ema_score := -1
@@ -227,8 +227,8 @@ if nlr_smooth
     non_linerreg_nlr  := non_linerreg_nlr / nlr_smooth_len
     
 var int nonlr_score = 0
-nonlr_long_signal = ta.crossover(non_linerreg_nlr, 0.5)
-nonlr_short_signal = ta.crossunder(non_linerreg_nlr, 0.5)
+nonlr_long_signal = ta.crossover(non_linerreg_nlr, 0.5)  and barstate.isconfirmed and inBacktestPeriod
+nonlr_short_signal = ta.crossunder(non_linerreg_nlr, 0.5)  and barstate.isconfirmed and inBacktestPeriod
 if non_linerreg_nlr >= 0.5
     nonlr_score := 1
 else if non_linerreg_nlr < 0.5

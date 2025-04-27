@@ -21,6 +21,7 @@ dema_enabled = input.bool(true, "Enable DEMA Supertrend", group="Toggle Indicato
 afr_enabled = input.bool(true, "Enable Dema AFR", group="Toggle Indicators")
 stc_enabled = input.bool(true, "Enable Schaff Trend Cycle", group="Toggle Indicators")
 rmi_enabled = input.bool(true, "Enable RMI Trend Sniper", group="Toggle Indicators")
+fdi_enabled = input.bool(true, "Enable FDI-Adaptive Supertrend", group="Toggle Indicators")
 
 // =======================================================================================================================================
 // ———— Indicator 1: Dema AFR | viResearch Settings ———— //
@@ -216,16 +217,104 @@ rmi_alpha = color.new(color.black, 100)
 rmi_max = rmi_RWMA + rmi_band
 rmi_min = rmi_RWMA - rmi_band
 
+// =======================================================================================================================================
+// ———— Indicator 5: FDI-Adaptive Supertrend w/ Floating Levels [Loxx] (Converted to v6) ———— //
+// =======================================================================================================================================
+
+// Input for source data (user-specified: ohlc4)
+fdi_src = input.source(ohlc4, "Source", group="FDI-Adaptive Supertrend Settings")
+// Input for fractal period (user-specified: 8)
+fdi_per = input.int(15, "Fractal Period Ingest", group="FDI-Adaptive Supertrend Settings")
+// Input for speed adjustment (user-specified: 30)
+fdi_speed = input.int(33, "Speed", group="FDI-Adaptive Supertrend Settings")
+// Input for Supertrend multiplier (user-specified: 3.25)
+fdi_mult = input.float(3.8, "Multiplier", group="FDI-Adaptive Supertrend Settings")
+// Input to enable adaptive period
+fdi_adapt = input.bool(true, "Make it adaptive?", group="FDI-Adaptive Supertrend Settings")
+
+// Colors for plotting
+fdi_greencolor = #2DD204
+fdi_redcolor = #D2042D
+
+// Custom RMA (Running Moving Average) function
+fdi_RMA(x, t) =>
+    EMA1 = x
+    EMA1 := na(EMA1[1]) ? x : (x - nz(EMA1[1])) * (1/t) + nz(EMA1[1])
+    EMA1
+
+// FDI (Fractal Dimension Index) calculation
+fdi_fdip(float src, int per, int speedin) =>
+    float fmax = ta.highest(src, per)  // Highest price in period
+    float fmin = ta.lowest(src, per)   // Lowest price in period
+    float length = 0
+    float diff = 0
+    for i = 1 to per - 1
+        diff := (nz(src[i]) - fmin) / (fmax - fmin)  // Normalized difference
+        if i > 0
+            length += math.sqrt(math.pow(nz(diff[i]) - nz(diff[i + 1]), 2) + (1 / math.pow(per, 2)))
+    float fdi = 1 + (math.log(length) + math.log(2)) / math.log(2 * per)  // FDI value
+    float traildim = 1 / (2 - fdi)    // Trail dimension
+    float alpha = traildim / 2        // Alpha for speed adjustment
+    int speed = math.round(speedin * alpha)  // Adjusted speed
+    speed
+
+// Supertrend calculation
+fdi_pine_supertrend(float src, float factor, int atrPeriod) =>
+    float atr = fdi_RMA(ta.tr(true), atrPeriod)  // ATR using RMA
+    float upperBand = src + factor * atr  // Upper band
+    float lowerBand = src - factor * atr  // Lower band
+    float prevLowerBand = nz(lowerBand[1])  // Previous lower band
+    float prevUpperBand = nz(upperBand[1])  // Previous upper band
+    
+    lowerBand := lowerBand > prevLowerBand or close[1] < prevLowerBand ? lowerBand : prevLowerBand
+    upperBand := upperBand < prevUpperBand or close[1] > prevUpperBand ? upperBand : prevUpperBand
+    int direction = na        // Direction variable
+    float superTrend = na     // Supertrend value
+    float prevSuperTrend = superTrend[1]
+    if na(atr[1])
+        direction := 1            // Initial direction
+    else if prevSuperTrend == prevUpperBand
+        direction := close > upperBand ? -1 : 1  // Direction based on upper band
+    else
+        direction := close < lowerBand ? 1 : -1  // Direction based on lower band
+    superTrend := direction == -1 ? lowerBand : upperBand  // Set Supertrend
+    [superTrend, direction]
+
+// Calculate adaptive period using FDI
+fdi_masterdom = fdi_fdip(fdi_src, fdi_per, fdi_speed)
+int fdi_len = math.floor(fdi_masterdom) < 1 ? 1 : math.floor(fdi_masterdom)
+fdi_len := nz(fdi_len, 1)
+
+// Compute Supertrend with adaptive or fixed period
+[fdi_supertrend, fdi_direction] = fdi_pine_supertrend(fdi_src, fdi_mult, fdi_adapt ? fdi_len : fdi_per)
+
+// Detect long and short signals with delayed confirmation
+fdi_goLong = fdi_direction == -1 and fdi_direction[1] == 1 and barstate.isconfirmed and inBacktestPeriod
+fdi_goShort = fdi_direction == 1 and fdi_direction[1] == -1 and barstate.isconfirmed and inBacktestPeriod
+
+// Assign score for strategy, 0 if disabled
+var int fdi_score = 0
+if fdi_enabled
+    if fdi_goLong
+        fdi_score := 1        // Long score
+    else if fdi_goShort
+        fdi_score := -1       // Short score
+
+
+
+
 // ———— Combined Signal Logic ———— //
 activeCount = (dema_enabled ? 1 : 0) + 
               (afr_enabled ? 1 : 0) + 
               (stc_enabled ? 1 : 0) + 
-              (rmi_enabled ? 1 : 0)
+              (rmi_enabled ? 1 : 0) +
+              (fdi_enabled ? 1 : 0)
 
 totalScore = (dema_enabled ? dema_score : 0) + 
              (afr_enabled ? afr_score : 0) + 
              (stc_enabled ? stc_score : 0) + 
-             (rmi_enabled ? rmi_score : 0)
+             (rmi_enabled ? rmi_score : 0) +
+             (fdi_enabled ? fdi_score : 0)
 
 finalSignal = activeCount > 0 ? totalScore / activeCount : 0
 
@@ -307,7 +396,13 @@ if rmi_long_signal
 plotcandle(open, high, low, close, color=rmi_Barcol, wickcolor=rmi_Barcol, bordercolor=rmi_Barcol, display=display.none)
 barcolor(color=rmi_Barcol, display=display.none)
 
-
+// =======================================================================================================================================
+// Plot FDI-Adaptive Supertrend line (hidden)
+// =======================================================================================================================================
+plot(fdi_supertrend, color=fdi_direction == -1 ? fdi_greencolor : fdi_redcolor, linewidth=3, title="FDI Supertrend", display=display.none)
+// Plot FDI-Adaptive Supertrend signals (hidden
+plotshape(fdi_goLong, title="FDI Long", style=shape.triangleup, location=location.belowbar, color=color.yellow, size=size.tiny, display=display.none)
+plotshape(fdi_goShort, title="FDI Short", style=shape.triangledown, location=location.abovebar, color=color.fuchsia, size=size.tiny, display=display.none)
 
 // =======================================================================================================================================
 // Plot final signal line
@@ -317,7 +412,7 @@ plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal
 // =======================================================================================================================================
 // ———— Table Display: Indicator Name and State ———— //
 // =======================================================================================================================================
-var table indicatorTable = table.new(position.top_right, 2, 6, border_width=1)
+var table indicatorTable = table.new(position.top_right, 2, 7, border_width=1)
 var table dateTable = table.new(position.middle_left, 2, 1, border_width=1)
 
 table.cell(dateTable, 0, 0, "Date", bgcolor=color.rgb(54, 58, 69, 64), text_color=color.white, text_size=size.normal)
@@ -338,5 +433,8 @@ table.cell(indicatorTable, 1, 3, str.tostring(stc_score), bgcolor=color.silver, 
 table.cell(indicatorTable, 0, 4, "RMI", bgcolor=color.silver, text_color=color.black)
 table.cell(indicatorTable, 1, 4, str.tostring(rmi_score), bgcolor=color.silver, text_color=color.black)
 
-table.cell(indicatorTable, 0, 5, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
-table.cell(indicatorTable, 1, 5, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 0, 5, "FDI", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 5, str.tostring(fdi_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 6, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
+table.cell(indicatorTable, 1, 6, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
