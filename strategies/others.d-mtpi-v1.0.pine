@@ -22,6 +22,7 @@ med_st_enabled = input.bool(true, "Enable Median Supertrend", group="Toggle Indi
 htvs_enabled = input.bool(true, "Enable Hyperbolic Tangent Volatility Stop", group="Toggle Indicators")             // ———— Toggle Indicator 3: Hyperbolic Tangent Volatility Stop
 dema_afr_enabled = input.bool(true, "Enable Dema AFR", group="Toggle Indicators")                                   // ———— Toggle Indicator 4: Dema AFR
 nkama_enabled = input.bool(true, "Enable Normalized KAMA Oscillator", group="Toggle Indicators")                    // ———— Toggle Indicator 5: Normalized KAMA Oscillator
+datr_enabled = input.bool(true, "Enable DEMA Adjusted Average True Range", group="Toggle Indicators")
 
 
 // =======================================================================================================================================
@@ -336,18 +337,97 @@ if nkama_enabled
         nkama_score := -1     // Short score
 
 
-// ———— Combined Signal Logic ———— //
-activeCount = (med_st_enabled                       ? 1 : 0) +
-              (fdi_enabled                          ? 1 : 0) +
-              (htvs_enabled                         ? 1 : 0) +
-              (dema_afr_enabled                     ? 1 : 0) +
-              (nkama_enabled                        ? 1 : 0)
+// =======================================================================================================================================
+// ———— Indicator 6: DEMA Adjusted Average True Range [BackQuant] (Converted to v6) ———— //
+// =======================================================================================================================================
 
-totalScore = (med_st_enabled                        ? med_st_score : 0) +
-             (fdi_enabled                           ? fdi_score : 0) +
-             (htvs_enabled                          ? htvs_score : 0) +
-             (dema_afr_enabled                      ? dema_afr_score : 0) +
-             (nkama_enabled                         ? nkama_score : 0)
+datr_showAtr = input.bool(true, "Plot Dema Atr on Chart?", group="DEMA ATR Settings")
+datr_haCandles = input.bool(false, "Use HA Candles?", group="DEMA ATR Settings")
+datr_periodDema = input.int(5, "Dema Period", group="DEMA ATR Settings")
+datr_sourceDema = input.source(close, "Calculation Source", group="DEMA ATR Settings")
+datr_periodAtr = input.int(14, "Period", group="DEMA ATR Settings")
+datr_factorAtr = input.float(1.6, "Factor", step=0.01, group="DEMA ATR Settings")
+datr_paintCandles = input.bool(false, "Paint Candles According to trend?", group="DEMA ATR Settings")
+datr_showMA = input.bool(false, "Show Atr Moving Average as Confluence?", group="Confluence")
+datr_movingAverageType = input.string("Ema", title="MA Type", options=["SMA", "Hull", "Ema", "Wma", "Dema"], group="Confluence")
+datr_movingAveragePeriod = input.int(40, "Moving Average Period", group="Confluence")
+datr_longColour = color.new(#00ff00, 0)
+datr_shortColour = color.new(#ff0000, 0)
+
+// Use HA Candles?
+datr_heikinashi_close = request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close, barmerge.gaps_off)
+var series float datr_source = close
+if datr_haCandles
+    datr_source := datr_heikinashi_close
+else
+    datr_source := datr_sourceDema
+
+// Function to calculate DEMA ATR with Bands
+datr_DemaAtrWithBands(periodDema, source, lookback, atrFactor) =>
+    ema1 = ta.ema(source, periodDema)
+    ema2 = ta.ema(ema1, periodDema)
+    demaOut = 2 * ema1 - ema2
+    atr = ta.atr(lookback)
+    trueRange = atr * atrFactor
+    datr_DemaAtr = demaOut
+    datr_DemaAtr := nz(datr_DemaAtr[1], datr_DemaAtr)
+    trueRangeUpper = demaOut + trueRange
+    trueRangeLower = demaOut - trueRange
+    if trueRangeLower > datr_DemaAtr
+        datr_DemaAtr := trueRangeLower
+    if trueRangeUpper < datr_DemaAtr
+        datr_DemaAtr := trueRangeUpper
+    datr_DemaAtr
+
+// Calculate DEMA ATR
+datr_DemaAtr = datr_DemaAtrWithBands(datr_periodDema, datr_source, datr_periodAtr, datr_factorAtr)
+
+// Moving Average Switch Type
+datr_movingAverage(source, length, type) =>
+    switch type
+        "SMA" => ta.sma(source, length)
+        "Hull" => ta.hma(source, length)
+        "Ema" => ta.ema(source, length)
+        "Wma" => ta.wma(source, length)
+        "Dema" => ta.dema(source, length)
+        => ta.ema(source, length)  // Default fallback
+
+datr_maOut = datr_movingAverage(datr_DemaAtr, datr_movingAveragePeriod, datr_movingAverageType)
+
+// Conditions for signals
+datr_L = ta.crossover(datr_DemaAtr, datr_DemaAtr[1]) and barstate.isconfirmed and inBacktestPeriod
+datr_S = ta.crossunder(datr_DemaAtr, datr_DemaAtr[1]) and barstate.isconfirmed and inBacktestPeriod
+
+// Track signal state
+var int datr_vii = 0
+if datr_L and not datr_S
+    datr_vii := 1
+else if datr_S
+    datr_vii := -1
+
+// Assign score for strategy, 0 if disabled
+var int datr_score = 0
+if datr_enabled
+    if datr_L
+        datr_score := 1
+    else if datr_S
+        datr_score := -1
+
+// Update activeCount and totalScore for combined signal logic
+activeCount = (med_st_enabled ? 1 : 0) +
+               (fdi_enabled ? 1 : 0) +
+               (htvs_enabled ? 1 : 0) +
+               (dema_afr_enabled ? 1 : 0) +
+               (nkama_enabled ? 1 : 0) +
+               (datr_enabled ? 1 : 0)
+
+totalScore = (med_st_enabled ? med_st_score : 0) +
+              (fdi_enabled ? fdi_score : 0) +
+              (htvs_enabled ? htvs_score : 0) +
+              (dema_afr_enabled ? dema_afr_score : 0) +
+              (nkama_enabled ? nkama_score : 0) +
+              (datr_enabled ? datr_score : 0)
+
 
 
 finalSignal = activeCount > 0 ? totalScore / activeCount : 0
@@ -419,7 +499,7 @@ plotshape(med_st_S, title="Median Short", style=shape.triangledown, location=loc
 // Plot FDI-Adaptive Supertrend line (hidden)
 // =======================================================================================================================================
 plot(fdi_supertrend, color=fdi_direction == -1 ? fdi_greencolor : fdi_redcolor, linewidth=3, title="FDI Supertrend", display=display.none)
-// Plot FDI-Adaptive Supertrend signals (hidden
+// Plot FDI-Adaptive Supertrend signals (hidden)
 plotshape(fdi_goLong, title="FDI Long", style=shape.triangleup, location=location.belowbar, color=color.yellow, size=size.tiny, display=display.none)
 plotshape(fdi_goShort, title="FDI Short", style=shape.triangledown, location=location.abovebar, color=color.fuchsia, size=size.tiny, display=display.none)
 
@@ -444,6 +524,23 @@ plot(nkama_norm ? nkama_normalized : na, style=plot.style_columns, color=nkama_c
 plot(not nkama_norm ? nkama_kama : na, style=plot.style_columns, color=nkama_col_wn, title="KAMA Oscillator", display=display.none)
 hline(0.2, color=nkama_col_up, linestyle=hline.style_dashed, display=display.none)
 hline(-0.2, color=nkama_col_dn, linestyle=hline.style_dashed, display=display.none)
+
+// =======================================================================================================================================
+// ———— Visuals for DEMA Adjusted Average True Range ———— //
+// =======================================================================================================================================
+var color datr_Trend = #ffffff
+
+if datr_L
+    datr_Trend := datr_longColour
+
+if datr_S
+    datr_Trend := datr_shortColour
+// datr_Trend := datr_L ? datr_longColour : datr_S ? datr_shortColour : color.new(#ffffff, 0)
+plot(datr_showAtr ? datr_DemaAtr : na, "ATR", color=datr_Trend, linewidth=2, display=display.none)
+barcolor(datr_paintCandles ? datr_Trend : na, display=display.none)
+plot(datr_showMA ? datr_maOut : na, "Moving Average", color=color.new(color.white, 0), linewidth=2, style=plot.style_line, display=display.none)
+
+
 // =======================================================================================================================================
 // Plot final signal line
 // =======================================================================================================================================
@@ -454,7 +551,7 @@ plot(finalSignal, title="Final Signal", style=plot.style_line, color=finalSignal
 // ———— Table Display: Indicator Name and State ———— //
 // =======================================================================================================================================
 
-var table indicatorTable = table.new(position.top_right, 2, 7, border_width=1)
+var table indicatorTable = table.new(position.top_right, 2, 8, border_width=1)
 var table dateTable = table.new(position.middle_left, 2, 1, border_width=1)
 
 table.cell(dateTable, 0, 0, "Date", bgcolor=color.rgb(54, 58, 69, 64), text_color=color.white, text_size=size.normal)
@@ -478,5 +575,8 @@ table.cell(indicatorTable, 1, 4, str.tostring(dema_afr_score), bgcolor=color.sil
 table.cell(indicatorTable, 0, 5, "Norm KAMA", bgcolor=color.silver, text_color=color.black)
 table.cell(indicatorTable, 1, 5, str.tostring(nkama_score), bgcolor=color.silver, text_color=color.black)
 
-table.cell(indicatorTable, 0, 6, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
-table.cell(indicatorTable, 1, 6, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 0, 6, "DEMA ATR", bgcolor=color.silver, text_color=color.black)
+table.cell(indicatorTable, 1, 6, str.tostring(datr_score), bgcolor=color.silver, text_color=color.black)
+
+table.cell(indicatorTable, 0, 7, "Score", bgcolor=color.rgb(189, 190, 178), text_color=color.black)
+table.cell(indicatorTable, 1, 7, str.tostring(finalSignal), bgcolor=color.silver, text_color=color.black)
